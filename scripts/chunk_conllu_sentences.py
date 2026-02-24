@@ -1,11 +1,11 @@
-from transformers import AutoModel, AutoTokenizer
-from sentence_transformers import SentenceTransformer
+from vllm import LLM
 from sentence_chunk import sentence_chunking_main
 import json
 import os
 import re
 from tqdm import tqdm
 import sys
+import torch
 
 def extract_sentences_from_file(file_path):
     """
@@ -25,7 +25,7 @@ def extract_sentences_from_file(file_path):
             for line in file:
                 match = re.search(pattern, line.strip())
                 if match:
-                    sentences.append(match.group(1).strip())
+                    sentences.append(match.group(1).strip()+' ')
     except FileNotFoundError:
         print(f"Error: The file '{file_path}' was not found.")
         return []
@@ -45,18 +45,17 @@ def main(cmd_args):
 
     ds_items = []
     TCBC_path = "data/TCBC/"
+    model = LLM(model="Qwen/Qwen3-Embedding-8B", runner="pooling", max_model_len=4096, gpu_memory_utilization=0.9, tensor_parallel_size=torch.cuda.device_count(),)
     with tqdm(range(525), desc="Chunking book sentences...") as pbar:
         for f in os.listdir(TCBC_path):
             book_id = f.replace('.conllu', '')
             sentences = extract_sentences_from_file(TCBC_path+f)
-            model = SentenceTransformer('TurkuNLP/sbert-cased-finnish-paraphrase')
         
-            chunks, chunk_lens = sentence_chunking_main(512, 0.6, True, sentences, model)
+            chunks, chunk_lens = sentence_chunking_main(512, 65, True, sentences, model)
 
             for i,c in enumerate(chunks):
                 ds_items.append({"book_id":book_id, "chunk_id":i, "chunk_len":chunk_lens[i], "text":c})
             pbar.update(1)
-            break
     
     with open(output_path, 'w', encoding='utf-8') as writer:
         for d in ds_items:

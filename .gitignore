@@ -3,7 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 data/*
-
+*.sh
+st-deps
+triton_cache
+vllm_cache
+*.out
 # C extensions
 *.so
 

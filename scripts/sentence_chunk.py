@@ -1,7 +1,8 @@
-#Code from https://github.com/ECNU-Text-Computing/DCS/tree/main
+#Modified code from https://github.com/ECNU-Text-Computing/DCS/tree/main
 
 import re
 import numpy as np
+import torch
 
 def sentence_split(text):
     single_sentences_list = re.split('([。；？！.;?!])', text)
@@ -100,7 +101,10 @@ def sentence_chunking(model, text, bpp_threshold):
     else:
         sentences = sentence_split(text)
     sentences = combine_sentences(sentences)
-    embeddings = model.encode([x['combined_sentence'] for x in sentences])
+    #Switched to using vllm
+    outputs = model.embed([x['combined_sentence'] for x in sentences])
+    embeddings = torch.tensor([o.outputs.embedding for o in outputs])
+    #embeddings = model.encode([x['combined_sentence'] for x in sentences])
 
     for i, sentence in enumerate(sentences):
         sentence['combined_sentence_embedding'] = embeddings[i]
