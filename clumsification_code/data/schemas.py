@@ -158,6 +158,7 @@ class CandidateRecord:
     perturbation_edits: tuple[str, ...] = ()
     target_dimensions: tuple[str, ...] = ()
     severity: str | None = None
+    edit_count: int | None = None
     generator: str | None = None
     seed: int | None = None
     prompt_version: str | None = None
@@ -193,6 +194,10 @@ class CandidateRecord:
             _string_tuple(self.perturbation_edits, "perturbation_edits", unique=False),
         )
         object.__setattr__(self, "target_dimensions", _string_tuple(self.target_dimensions, "target_dimensions"))
+        if self.edit_count is not None:
+            _integer(self.edit_count, "edit_count", minimum=0)
+            if self.edit_count != len(self.perturbation_edits):
+                raise ValueError("edit_count must equal the number of perturbation_edits")
         for name in ("severity", "generator", "prompt_version", "prompt_hash", "catalog_hash"):
             object.__setattr__(self, name, _optional_string(getattr(self, name), name))
         if self.seed is not None and (isinstance(self.seed, bool) or not isinstance(self.seed, int)):
@@ -215,7 +220,7 @@ class CandidateRecord:
             raise ValueError(f"Candidate row is missing fields: {missing}")
         known = required | {
             "schema_version", "source_method", "source_run_id", "perturbation_edits",
-            "target_dimensions", "severity", "generator", "seed", "prompt_version",
+            "target_dimensions", "severity", "edit_count", "generator", "seed", "prompt_version",
             "prompt_hash", "catalog_hash",
         }
         return cls(
@@ -237,6 +242,7 @@ class CandidateRecord:
             ),
             target_dimensions=_string_tuple(row.get("target_dimensions"), "target_dimensions"),
             severity=row.get("severity"),
+            edit_count=row.get("edit_count"),
             generator=row.get("generator"),
             seed=row.get("seed"),
             prompt_version=row.get("prompt_version"),
@@ -265,6 +271,7 @@ class CandidateRecord:
             "perturbation_edits": list(self.perturbation_edits),
             "target_dimensions": list(self.target_dimensions),
             "severity": self.severity,
+            "edit_count": self.edit_count,
             "generator": self.generator,
             "seed": self.seed,
             "prompt_version": self.prompt_version,

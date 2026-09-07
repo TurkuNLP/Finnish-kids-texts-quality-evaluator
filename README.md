@@ -10,7 +10,8 @@ The perturbation workflow supports:
 - UniEval-style and multilingual traditional perturbations;
 - generation from an original or any canonical perturbation layer;
 - method- and run-separated outputs with exact candidate ancestry;
-- scalar supervision attached to exact candidate identities;
+- automatic scalar supervision attached to exact candidate identities,
+  including G-Eval and Themis/MENLO fluency judgments;
 - leakage-safe Hugging Face datasets with configurable mixtures and pairs.
 
 ## Canonical commands
@@ -20,7 +21,7 @@ Generate one perturbation layer:
 ```bash
 python scripts/generate_perturbations.py \
   --dataset <dataset> --source-layer 0 \
-  --method llm_sampled --run-id sampled-v1
+  --method llm_sampled --run-id sampled-dynamic-v1
 ```
 
 Build a Hugging Face dataset:
@@ -53,7 +54,8 @@ python scripts/score_custom_dataset.py \
   --scoring-run-id bertscore-v1
 ```
 
-The prompt-based custom-dataset scorers are:
+Two candidate-only LLM-judge supervision conditions are available alongside
+the metric-based scorers:
 
 ```bash
 # G-Eval with the pinned GPT-5.4-mini judge

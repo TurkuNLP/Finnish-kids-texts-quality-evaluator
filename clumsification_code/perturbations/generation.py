@@ -562,26 +562,31 @@ class PerturbationGenerationService:
                         "max_output_chars must be a positive integer"
                     )
                 if len(result.text) > max_output_chars:
-                    # Output length is controlled by the model, so an isolated
-                    # refusal to follow this prompt constraint must not discard
-                    # every valid generation in a large batch. Treat it like an
-                    # over-context request: omit the candidate and preserve an
-                    # auditable reason in the layer configuration.
-                    skipped_invalid_output.append(
-                        {
-                            "parent_candidate_id": parent_id,
-                            "reason": "max_output_chars_exceeded",
-                            "output_chars": len(result.text),
-                            "max_output_chars": max_output_chars,
-                            "retry_attempts": retry_counts.get(parent_id, 0),
-                        }
-                    )
-                    continue
+                    retry_attempts = retry_counts.get(parent_id, 0)
+                    if retry_attempts < 3:
+                        skipped_invalid_output.append(
+                            {
+                                "parent_candidate_id": parent_id,
+                                "reason": "max_output_chars_exceeded",
+                                "output_chars": len(result.text),
+                                "max_output_chars": max_output_chars,
+                                "retry_attempts": retry_attempts,
+                            }
+                        )
+                        continue
+                    # Preserve otherwise valid samples after three retries
+                    # have failed the model-controlled length constraint. This
+                    # avoids systematic loss of valid candidates in large runs
+                    # while keeping the exception explicit in candidate data.
+                    result.metadata = {
+                        **result.metadata,
+                        "length_limit_exceeded": True,
+                        "output_chars": len(result.text),
+                        "max_output_chars": max_output_chars,
+                        "retry_attempts": retry_attempts,
+                    }
             candidate_index = candidate_counts[parent_id]
             candidate_counts[parent_id] += 1
-            metadata = dict(result.metadata)
-            if result.edit_count is not None:
-                metadata["edit_count"] = result.edit_count
             candidates.append(
                 CandidateRecord(
                     dataset_name=result.dataset_name,
@@ -608,12 +613,13 @@ class PerturbationGenerationService:
                     perturbation_edits=tuple(result.perturbation_edits),
                     target_dimensions=tuple(result.target_dimensions),
                     severity=result.severity,
+                    edit_count=result.edit_count,
                     generator=result.generator,
                     seed=result.seed,
                     prompt_version=result.prompt_version,
                     prompt_hash=result.prompt_hash,
                     catalog_hash=result.catalog_hash,
-                    metadata=metadata,
+                    metadata=dict(result.metadata),
                 )
             )
         skipped_ids = {

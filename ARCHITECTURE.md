@@ -60,8 +60,9 @@ client; `scripts/prepare_dataset.py` can execute several declared generations.
 Canonical method names are `llm_zero_shot`, `llm_sampled`, `unieval`,
 `trad_single`, `trad_multi`, and `unieval_trad`. LLM implementations share a
 runner boundary and load vLLM only when needed. The sampled method uses a
-versioned JSONL edit catalog and deterministically samples operations,
-dimensions, and severity from the configured seed.
+versioned JSONL edit catalog and deterministically samples, for each
+candidate, the edit count, target dimensions, operations, and severity from
+its stable seed.
 
 Traditional perturbation is multilingual: English morphology uses
 Lemminflect and other supported languages use UniMorph. The registry exposes

@@ -13,6 +13,11 @@ from .sampling import (
     SampledEditAssignment,
     load_edit_catalog,
     sample_edit_assignment,
+    sample_edit_count,
+    sample_dimension_count,
+    sample_severity,
+    sample_target_dimensions,
+    SEVERITIES,
 )
 from .schemas import GenerationRuntime, PerturbationInput, PerturbationResult
 
@@ -39,6 +44,12 @@ class SampledPromptRequest:
 def _stable_item_seed(base_seed: int, item: Mapping[str, Any], index: int) -> int:
     identity = item.get("candidate_id") or item.get("custom_id") or item.get("_source_index") or index
     raw = f"{base_seed}:{identity}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "big")
+
+
+def _stable_stream_seed(item_seed: int, stream: str) -> int:
+    """Derive an independent deterministic sampling stream for one item."""
+    raw = f"{item_seed}:{stream}".encode("utf-8")
     return int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "big")
 
 
@@ -109,23 +120,38 @@ class SampledLLMMethod:
         )
         self.catalog = load_edit_catalog(catalog_path)
         self.catalog_hash = sha256_file(catalog_path)
-        self.target_dimensions = tuple(
-            self.config.get("target_dimensions", ("Clarity", "Naturalness"))
-        )
-        self.n_edits = int(self.config.get("n_edits", self.config.get("edits_per_candidate", 3)))
-        self.severity = self.config.get("severity", "medium")
         self.seed = int(self.config.get("seed", 42))
         self.weights = self.config.get("weights")
         self.require_dimension_coverage = bool(self.config.get("require_dimension_coverage", True))
 
     def assignment_for_item(self, item: Mapping[str, Any], *, index: int = 0) -> SampledEditAssignment:
         seed = _stable_item_seed(self.seed, item, index)
+        n_edits = sample_edit_count(
+            len(str(item.get("text", "")).replace("\n", " ")),
+            seed=_stable_stream_seed(seed, "edit_count"),
+        )
+        available_dimension_count = len({
+            " ".join(dimension.casefold().split())
+            for entry in self.catalog
+            for dimension in entry.target_dimensions
+        })
+        target_dimensions = sample_target_dimensions(
+            self.catalog,
+            n_dimensions=sample_dimension_count(
+                n_edits=n_edits,
+                available_dimensions=available_dimension_count,
+                seed=_stable_stream_seed(seed, "dimension_count"),
+            ),
+            seed=_stable_stream_seed(seed, "target_dimensions"),
+        )
         return sample_edit_assignment(
             self.catalog,
-            target_dimensions=self.target_dimensions,
-            n_edits=self.n_edits,
-            severity=self.severity,
-            seed=seed,
+            target_dimensions=target_dimensions,
+            n_edits=n_edits,
+            severity=sample_severity(
+                SEVERITIES, seed=_stable_stream_seed(seed, "severity")
+            ),
+            seed=_stable_stream_seed(seed, "edit_operations"),
             weights=self.weights,
             require_dimension_coverage=self.require_dimension_coverage,
         )

@@ -11,6 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
+import pyarrow as pa
 from datasets import Dataset, DatasetDict, load_from_disk
 
 from clumsification_code.data.candidate_identity import make_original_candidate_id
@@ -285,7 +286,32 @@ def _rows_from_chains(
         for score_name in score_names:
             row[score_name] = [item["score_dict"].get(score_name) for item in items]
         rows.append(row)
-    return Dataset.from_list(rows)
+    # ``Dataset.from_list`` infers ``list<string>`` for ``texts``.  Arrow uses
+    # 32-bit offsets for that type, so a large unfiltered build fails once the
+    # combined text payload reaches 2 GiB (usually during dataset
+    # fingerprinting).  Build an Arrow table with 64-bit string offsets before
+    # handing it to Datasets.  Keep the outer list type standard: only the
+    # concatenated string data, not the number of items in a chain, is large.
+    string_list = pa.list_(pa.large_string())
+    schema_fields = [
+        pa.field("id", pa.large_string()),
+        pa.field("dataset_name", pa.large_string()),
+        pa.field("source_original_ids", string_list),
+        pa.field("texts", string_list),
+        pa.field("labels", pa.list_(pa.int64())),
+        pa.field("candidate_ids", string_list),
+        pa.field("perturbation_sources", string_list),
+        pa.field("perturbation_methods", string_list),
+        pa.field("perturbation_run_ids", string_list),
+        pa.field("parent_candidate_ids", string_list),
+        pa.field("source_layers", pa.list_(pa.int64())),
+        pa.field("source_methods", string_list),
+        pa.field("source_run_ids", string_list),
+    ]
+    schema_fields.extend(
+        pa.field(score_name, pa.list_(pa.float64())) for score_name in score_names
+    )
+    return Dataset(pa.Table.from_pylist(rows, schema=pa.schema(schema_fields)))
 
 
 def _downsample_dataset_dict(

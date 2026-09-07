@@ -60,8 +60,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-jobs", type=int, default=None)
     parser.add_argument("--operation", default=None)
     parser.add_argument("--operations", nargs="+", default=None)
-    parser.add_argument("--target-dimensions", nargs="+", default=None)
-    parser.add_argument("--severity", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--allow-unchanged", action="store_true", default=None)
     parser.add_argument(
@@ -101,8 +99,6 @@ def main() -> None:
                 "n_jobs": args.n_jobs,
                 "operation": args.operation,
                 "operations": args.operations,
-                "target_dimensions": args.target_dimensions,
-                "severity": args.severity,
                 "allow_unchanged": args.allow_unchanged,
                 "max_retries": args.max_retries,
                 "max_attempts": args.max_attempts,

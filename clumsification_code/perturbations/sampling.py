@@ -111,6 +111,74 @@ def _dimension_key(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def sample_edit_count(
+    text_length: int,
+    *,
+    seed: int,
+    max_edits: int | None = None,
+) -> int:
+    """Sample a length-scaled edit count from a truncated normal distribution.
+
+    The range is one through ``floor(text_length / 500)``. Short texts
+    therefore still receive one edit. ``max_edits`` caps the draw when a
+    catalog cannot provide more distinct compatible operations.
+    """
+    if text_length < 0:
+        raise ValueError("text_length must be non-negative")
+    if max_edits is not None and max_edits < 1:
+        raise ValueError("max_edits must be at least 1 when provided")
+
+    upper = max(1, text_length // 500)
+    if max_edits is not None:
+        upper = min(upper, max_edits)
+    if upper == 1:
+        return 1
+
+    mean = (1 + upper) / 2
+    standard_deviation = (upper - 1) / 6
+    rng = random.Random(seed)
+    while True:
+        draw = rng.normalvariate(mean, standard_deviation)
+        if 1 <= draw <= upper:
+            return min(upper, max(1, int(draw + 0.5)))
+
+
+def sample_target_dimensions(
+    catalog: Sequence[EditCatalogEntry],
+    *,
+    n_dimensions: int,
+    seed: int,
+) -> tuple[str, ...]:
+    """Uniformly sample distinct target dimensions represented in a catalog."""
+    if n_dimensions < 1:
+        raise ValueError("n_dimensions must be at least 1")
+    dimensions_by_key: dict[str, str] = {}
+    for entry in catalog:
+        for dimension in entry.target_dimensions:
+            dimensions_by_key.setdefault(_dimension_key(dimension), dimension)
+    dimensions = tuple(dimensions_by_key[key] for key in sorted(dimensions_by_key))
+    if n_dimensions > len(dimensions):
+        raise ValueError(
+            f"Requested {n_dimensions} target dimensions but catalog has only "
+            f"{len(dimensions)}"
+        )
+    return tuple(random.Random(seed).sample(dimensions, n_dimensions))
+
+
+def sample_dimension_count(
+    *,
+    n_edits: int,
+    available_dimensions: int,
+    seed: int,
+) -> int:
+    """Sample how many dimensions a candidate targets for its edit count."""
+    if n_edits < 1:
+        raise ValueError("n_edits must be at least 1")
+    if available_dimensions < 1:
+        raise ValueError("available_dimensions must be at least 1")
+    return random.Random(seed).randint(1, min(n_edits, available_dimensions))
+
+
 def _weighted_choice_without_replacement(
     candidates: list[EditCatalogEntry],
     count: int,
@@ -147,7 +215,12 @@ def sample_edit_types(
     weights: Mapping[str, float] | None = None,
     require_dimension_coverage: bool = True,
 ) -> tuple[EditCatalogEntry, ...]:
-    """Sample distinct edits deterministically, optionally covering dimensions."""
+    """Sample edit assignments deterministically, optionally covering dimensions.
+
+    Operations are sampled without replacement until the compatible catalog is
+    exhausted, then with replacement. This permits long texts to receive more
+    edits than one selected dimension has distinct catalog entries.
+    """
     if n_edits < 1:
         raise ValueError("n_edits must be at least 1")
     dimensions = tuple(dict.fromkeys(_dimension_key(value) for value in target_dimensions if value.strip()))
@@ -157,9 +230,6 @@ def sample_edit_types(
         (entry for entry in catalog if any(_dimension_key(dim) in dimensions for dim in entry.target_dimensions)),
         key=lambda entry: entry.edit_id,
     )
-    if n_edits > len(candidates):
-        raise ValueError(f"Requested {n_edits} edits but only {len(candidates)} match target dimensions")
-
     rng = random.Random(seed)
     selected: list[EditCatalogEntry] = []
     remaining = list(candidates)
@@ -181,7 +251,10 @@ def sample_edit_types(
             remaining.remove(choice)
             uncovered -= {_dimension_key(dim) for dim in choice.target_dimensions}
 
-    selected.extend(_weighted_choice_without_replacement(remaining, n_edits - len(selected), rng, weights))
+    while len(selected) < n_edits:
+        selected.append(
+            _weighted_choice_without_replacement(candidates, 1, rng, weights)[0]
+        )
     return tuple(selected)
 
 
@@ -238,6 +311,9 @@ __all__ = [
     "SampledEditAssignment",
     "load_edit_catalog",
     "sample_edit_assignment",
+    "sample_edit_count",
     "sample_edit_types",
+    "sample_dimension_count",
     "sample_severity",
+    "sample_target_dimensions",
 ]

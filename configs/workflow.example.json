@@ -6,23 +6,17 @@
   "generations": [
     {
       "method": "llm_sampled",
-      "run_id": "sampled-medium-v1",
+      "run_id": "sampled-dynamic-v1",
       "source_layer": 0,
       "target_layer": 1,
-      "config": {
-        "severity": "medium",
-        "target_dimensions": [
-          "Clarity",
-          "Naturalness"
-        ]
-      }
+      "config": {}
     },
     {
       "method": "trad_multi",
       "run_id": "trad-v1",
       "source_layer": 1,
       "source_method": "llm_sampled",
-      "source_run_id": "sampled-medium-v1",
+      "source_run_id": "sampled-dynamic-v1",
       "target_layer": 2,
       "config": {
         "language": "en"
@@ -36,7 +30,7 @@
       "trad_multi"
     ],
     "include_runs": [
-      "sampled-medium-v1",
+      "sampled-dynamic-v1",
       "trad-v1"
     ],
     "include_layers": [

@@ -8,7 +8,7 @@
     "trad_multi"
   ],
   "include_runs": [
-    "sampled-medium-v1",
+    "sampled-dynamic-v1",
     "trad-v1"
   ],
   "include_layers": [

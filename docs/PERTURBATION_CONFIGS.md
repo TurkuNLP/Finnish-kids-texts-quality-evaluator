@@ -37,12 +37,9 @@ python scripts/generate_perturbations.py \
   --dataset my_dataset \
   --source-layer 0 \
   --method llm_sampled \
-  --run-id sampled-medium-v1 \
+  --run-id sampled-dynamic-v1 \
   --target-layer 1 \
-  --model-path Qwen/Qwen3.5-27B \
-  --target-dimensions Clarity Naturalness \
-  --severity medium \
-  --n-edits 3
+  --model-path Qwen/Qwen3.5-27B
 ```
 
 To perturb an existing layer, identify its method and run:
@@ -52,12 +49,34 @@ python scripts/generate_perturbations.py \
   --dataset my_dataset \
   --source-layer 1 \
   --source-method llm_sampled \
-  --source-run-id sampled-medium-v1 \
+  --source-run-id sampled-dynamic-v1 \
   --method trad_multi \
   --run-id trad-after-llm-v1 \
   --target-layer 2 \
   --language en \
   --n-edits 3
+```
+
+### CSC batch-job examples
+
+The wrappers in `updated_sbatch_jobs/` use the same canonical commands. For a
+sampled-LLM pilot, submit the dedicated wrapper with environment variables:
+
+```bash
+DATASET=my_dataset RUN_ID=sampled-dynamic-v1 LIMIT=1000 \
+  sbatch updated_sbatch_jobs/pert_job.sh
+```
+
+`pert_job.sh` deliberately does not expose fixed edit-count, target-dimension,
+or severity settings: `llm_sampled` samples all three per source text. Set
+`MAX_MODEL_LEN` only to change the LLM context ceiling; set `MAX_RETRIES` only
+when intentionally changing the default three retries. The generic wrapper is
+equivalent when explicit command-line arguments are preferable:
+
+```bash
+sbatch updated_sbatch_jobs/generate_perturbations.sh \
+  --dataset my_dataset --source-layer 0 --method llm_sampled \
+  --run-id sampled-dynamic-v1 --model-path Qwen/Qwen3.5-27B
 ```
 
 `target_layer` defaults to `source_layer + 1`. A perturbed source requires
@@ -88,9 +107,6 @@ operations are excluded where they are not applicable. The former
   "model": "Qwen/Qwen3.5-27B",
   "language": "english",
   "edit_catalog": "data/perturbation_prompts/english/edit_types.jsonl",
-  "target_dimensions": ["Clarity", "Naturalness"],
-  "n_edits": 3,
-  "severity": "medium",
   "require_dimension_coverage": true,
   "weights": {
     "unnecessary_circumlocution": 1.0,
@@ -100,9 +116,35 @@ operations are excluded where they are not applicable. The former
 }
 ```
 
-`severity` accepts `weak`, `medium`, `strong`, or an array from which a value
-is sampled deterministically. vLLM and model dependencies load only when an
-LLM method is executed.
+For `llm_sampled`, the edit count is sampled deterministically from each
+source text's character length; it is not a configuration option. Target
+dimensions are sampled uniformly from the dimensions in the edit catalog. The
+number selected is sampled uniformly from one through the smaller of the edit
+count and the number of catalog dimensions. Severity is sampled uniformly and
+deterministically from `weak`, `medium`, and `strong`; it is not a
+configuration option. vLLM and model dependencies load only when an LLM method
+is executed. When a selected dimension has fewer catalog operations than the
+sampled edit count, operations may repeat so that the requested count is
+preserved.
+Each sampling decision uses its own deterministic seed derived from the
+candidate identity, so changing one sampling stage does not reshuffle the
+others.
+
+LLM outputs that are empty, unchanged, or longer than their requested
+character limit are retried up to three times. If the final output is otherwise
+valid but still over the length limit, it is retained and marked with
+`length_limit_exceeded`, `output_chars`, `max_output_chars`, and
+`retry_attempts` in its candidate metadata.
+
+### Edit-count provenance
+
+Every generated candidate row has an `edit_count` field. For both
+`llm_sampled` and traditional methods, it is the number of recorded
+`perturbation_edits` and must equal the length of that array. In particular,
+it is not the number of target dimensions or a severity level. For
+`llm_sampled`, it is the per-text sampled number of required edit operations;
+for traditional methods, it is the number of operations that actually made a
+change. Historical rows without this field remain readable as `null`.
 
 ### Traditional options
 
@@ -129,7 +171,7 @@ python scripts/score_custom_dataset.py \
   --scoring-type bertscore_f1 \
   --scoring-run-id bertscore-v1 \
   --methods llm_sampled trad_multi \
-  --perturbation-run-ids sampled-medium-v1 trad-after-llm-v1 \
+  --perturbation-run-ids sampled-dynamic-v1 trad-after-llm-v1 \
   --target-layers 1 2 \
   --reference-policy parent
 ```
@@ -181,7 +223,7 @@ python scripts/build_hf_dataset.py \
   --datasets my_dataset \
   --output-name my_dataset_hf \
   --include-methods llm_sampled trad_multi \
-  --include-runs sampled-medium-v1 trad-after-llm-v1 \
+  --include-runs sampled-dynamic-v1 trad-after-llm-v1 \
   --include-layers 1 2 \
   --composition balanced \
   --pair-policy parent_child \
@@ -247,21 +289,18 @@ Generation options belong inside each entry's `config` object:
   "generations": [
     {
       "method": "llm_sampled",
-      "run_id": "sampled-medium-v1",
+      "run_id": "sampled-dynamic-v1",
       "source_layer": 0,
       "target_layer": 1,
       "config": {
-        "model": "Qwen/Qwen3.5-27B",
-        "target_dimensions": ["Clarity", "Naturalness"],
-        "severity": "medium",
-        "n_edits": 3
+        "model": "Qwen/Qwen3.5-27B"
       }
     }
   ],
   "hf": {
     "output_name": "my_dataset_sampled",
     "include_methods": ["llm_sampled"],
-    "include_runs": ["sampled-medium-v1"],
+    "include_runs": ["sampled-dynamic-v1"],
     "include_layers": [1],
     "composition": "all",
     "pair_policy": "none"
