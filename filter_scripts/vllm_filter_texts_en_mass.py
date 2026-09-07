@@ -258,7 +258,7 @@ def main():
 
     llm = LLM(
         model=args.model_path,
-        #max_model_len=args.max_model_len,
+        max_model_len=args.max_model_len,
         tensor_parallel_size=tensor_parallel_size,
         language_model_only=True,
     )

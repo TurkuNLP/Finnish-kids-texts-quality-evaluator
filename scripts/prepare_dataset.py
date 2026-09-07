@@ -80,7 +80,9 @@ def load_workflow_config(
     return config
 
 
-def run_generations(config: WorkflowConfig, *, overwrite: bool = False) -> list[Path]:
+def run_generations(
+    config: WorkflowConfig, *, overwrite: bool = False, retry_failed: bool = False
+) -> list[Path]:
     outputs = []
     for generation in config.generations:
         generation_config = dict(generation.config)
@@ -95,8 +97,10 @@ def run_generations(config: WorkflowConfig, *, overwrite: bool = False) -> list[
             run_id=generation.run_id,
             target_layer=generation.target_layer,
             config=generation_config,
+            source_partitions=generation.source_partitions or None,
             limit=generation.limit,
             overwrite=overwrite,
+            retry_failed=retry_failed,
         ))
     return outputs
 
@@ -128,14 +132,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset")
     parser.add_argument("--output-root", default="data/hf_datasets")
     parser.add_argument("--overwrite", action="store_true")
-    return parser.parse_args()
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry and merge only missing candidates in each configured generation layer.",
+    )
+    args = parser.parse_args()
+    if args.overwrite and args.retry_failed:
+        parser.error("--overwrite and --retry-failed cannot be used together")
+    return args
 
 
 def main() -> None:
     args = parse_args()
     config = load_workflow_config(args.config, preset=args.preset, dataset=args.dataset)
     if args.command in {"generate", "run-all"}:
-        for path in run_generations(config, overwrite=args.overwrite):
+        for path in run_generations(
+            config, overwrite=args.overwrite, retry_failed=args.retry_failed
+        ):
             print(f"Generated: {path}")
     if args.command in {"build-hf", "run-all"}:
         print(f"Built: {build_hf(config, output_root=args.output_root, overwrite=args.overwrite)}")

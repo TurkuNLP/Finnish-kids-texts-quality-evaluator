@@ -129,6 +129,49 @@ the Hugging Face Trainer. Evaluation adapters under
 `clumsification_code/evals/` expose shared candidate-scoring interfaces to the
 benchmark runner.
 
+### Full pairwise training recipe
+
+`updated_sbatch_jobs/train_fe_pairwise_full.sh` is the production recipe for
+the approximately 390k-pair UniEval-style training dataset. It trains
+`Qwen/Qwen3-Embedding-0.6B` with last-token pooling selected automatically by
+the backbone profile, FlashAttention 2, and a 32,768-token limit. On four
+GPUs, its per-device batch size of 32 and accumulation of 1 yield a global
+batch of 128 pairs.
+
+Validation runs every 39 updates (4,992 pairs) and checkpoints are saved every
+195 updates (24,960 pairs), so each retained checkpoint has a fresh validation
+metric. Training has a three-epoch upper bound and ends earlier after three
+successive saved checkpoints fail to improve pairwise validation accuracy.
+The job retains up to 50 model-only checkpoints, sufficient for the full
+three-epoch ceiling and inexpensive enough to keep for the external evaluation
+suite. Model-only checkpoints intentionally omit optimizer and scheduler state:
+they can be evaluated with `load_fe_model`, but are not resumable training
+checkpoints.
+
+```bash
+sbatch updated_sbatch_jobs/train_fe_pairwise_full.sh \
+  /absolute/path/to/unieval_pairwise_dataset \
+  outputs/fe_qwen3_unieval_pairwise_full
+```
+
+### Staged one-method pilot
+
+For the decision of whether to commission larger LLM perturbation runs,
+`updated_sbatch_jobs/train_fe_pairwise_pilot.sh` trains on a fixed 50k-source
+block from one perturbation method. Its source-level partitions keep a 10k dev
+set and a separate 10k test set constant across the 50k, 100k, and later
+training subsets. With one original and one selected perturbation per source,
+the job executes 390 updates (49,920 pairs) and saves five checkpoints at
+9,984-pair intervals. It uses FlashAttention 2, 32 train pairs/GPU, and 48
+evaluation pairs/GPU. Validation begins after 20k pairs and stopping requires
+three saved checkpoints without at least a 0.003 pairwise-accuracy gain.
+
+```bash
+sbatch updated_sbatch_jobs/train_fe_pairwise_pilot.sh \
+  data/hf_datasets/en/unieval_pilot_50k \
+  outputs/fe_qwen3_unieval_pilot_50k
+```
+
 ## Configuration contracts
 
 `clumsification_code/data/schemas.py` defines versioned original, candidate,

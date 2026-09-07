@@ -28,6 +28,46 @@ to infer layers. Every candidate records its method, run, source and target
 layers, and exact `parent_candidate_id`. A new layer may therefore start from
 an original or any existing layer, including one produced by another method.
 
+### Fixed source partitions for staged experiments
+
+For a large custom dataset, assign source-level partitions once before
+generation. This preserves train/dev/test isolation across every perturbation
+method and makes 50k, 100k, and larger training subsets nested rather than
+independently resampled:
+
+```bash
+# Preview only; this does not change original.jsonl.
+python -m scripts.assign_dataset_partitions \
+  --dataset nemotron-cc-high-propella-eng \
+  --dev-size 10000 --test-size 10000 --train-block-size 50000 \
+  --seed 42 --dry-run
+
+# Apply the reviewed plan atomically.
+python -m scripts.assign_dataset_partitions \
+  --dataset nemotron-cc-high-propella-eng \
+  --dev-size 10000 --test-size 10000 --train-block-size 50000 \
+  --seed 42
+```
+
+The command adds `partition` to each original record and writes
+`partition_manifest.json`. The standard high-propella plan has `dev` and
+`test` partitions of 10k sources each, ten `train_01`–`train_10` blocks of
+50k sources, and `train_remainder`. Assignment is deterministic and
+stratified by source-document character-length decile.
+
+Generate expensive perturbations only for the needed pilot scope:
+
+```bash
+python -m scripts.generate_perturbations \
+  --dataset nemotron-cc-high-propella-eng \
+  --source-layer 0 --method llm_sampled --run-id sampled-pilot-v1 \
+  --source-partitions dev test train_01
+```
+
+The selected partition labels are recorded in the layer manifest. The same
+option works when generating from a nonzero source layer because selection is
+always resolved through the canonical original source.
+
 ## Generate one layer
 
 Use `scripts/generate_perturbations.py` for a single generation:
@@ -83,6 +123,30 @@ sbatch updated_sbatch_jobs/generate_perturbations.sh \
 both `source_method` and `source_run_id`. Existing outputs are protected; use
 `--overwrite` only when replacement is intentional. A reusable method config
 can be passed with `--method-config`; explicit CLI values take precedence.
+
+### Recover failed inputs without regenerating successful ones
+
+If a completed layer contains skipped inputs, rerun the original command with
+the same dataset, source, method, run ID, partition selection, and generation
+configuration, adding `--retry-failed`:
+
+```bash
+python scripts/generate_perturbations.py \
+  --dataset my_dataset --source-layer 0 --method llm_sampled \
+  --run-id sampled-dynamic-v1 --model-path Qwen/Qwen3.5-27B \
+  --retry-failed
+```
+
+This retries only source candidates that still lack an output, preserves all
+existing candidate rows, and atomically replaces the same layer file and its
+manifest entry with the merged result. It does not create another run. Each
+retry records its effective seed, attempted and recovered counts, and any
+remaining failures in that layer's manifest. `--retry-failed` cannot be used
+with `--overwrite`.
+
+For the sampled-LLM wrapper, use the same environment values with
+`RETRY_FAILED=1`; for example, `DATASET=my_dataset RUN_ID=sampled-dynamic-v1
+RETRY_FAILED=1 sbatch updated_sbatch_jobs/pert_job.sh`.
 
 ### Available methods
 
@@ -230,6 +294,22 @@ python scripts/build_hf_dataset.py \
   --score-names bertscore_f1 \
   --score-run-ids bertscore-v1
 ```
+
+For a partitioned one-method 50k pilot, fixed `dev` and `test` sources are
+included automatically and `train_01` is selected explicitly:
+
+```bash
+python -m scripts.build_hf_dataset \
+  --datasets nemotron-cc-high-propella-eng \
+  --output-name en/unieval_pilot_50k \
+  --include-methods unieval --include-runs unieval-v1 --include-layers 1 \
+  --train-partitions 1
+```
+
+`--train-partitions 1 2` builds the nested 100k version. Partition numbers
+must be the contiguous prefix `1..N`; ratio splitting and `downsample_size`
+are not used in this mode. The builder rejects a selected source with no
+candidate matching the method/run/layer filters.
 
 Equivalent config-based use:
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from typing import Any, Literal
 
+import pyarrow as pa
 from datasets import Dataset, DatasetDict
 
 
@@ -65,7 +66,10 @@ def _aligned_items(chain: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "source_id": str(chain["id"]),
             "dataset_name": chain.get("dataset_name"),
-            "source_original_ids": list(chain.get("source_original_ids", [])),
+            "source_original_ids": [
+                str(original_id)
+                for original_id in chain.get("source_original_ids", [])
+            ],
             "text": fields["texts"][index],
             "layer": fields["labels"][index],
             "candidate_id": fields["candidate_ids"][index],
@@ -80,6 +84,33 @@ def _aligned_items(chain: dict[str, Any]) -> list[dict[str, Any]]:
         }
         for index in range(len(fields["texts"]))
     ]
+
+
+_LARGE_STRING_LIST = pa.list_(pa.large_string())
+
+
+def _pairwise_dataset_from_rows(rows: list[dict[str, Any]]) -> Dataset:
+    """Build pairwise data with 64-bit text offsets.
+
+    ``Dataset.from_list`` infers Arrow ``string`` for candidate texts.  The
+    full UniEval-style pairwise split exceeds that type's 2 GiB combined
+    payload limit while Datasets concatenates its rows.  Explicitly preserving
+    ``large_string`` here prevents the overflow at the training boundary.
+    """
+    schema = pa.schema([
+        pa.field("pair_id", pa.large_string()),
+        pa.field("source_id", pa.large_string()),
+        pa.field("dataset_name", pa.large_string()),
+        pa.field("source_original_ids", _LARGE_STRING_LIST),
+        pa.field("chosen_id", pa.large_string()),
+        pa.field("rejected_id", pa.large_string()),
+        pa.field("chosen_text", pa.large_string()),
+        pa.field("rejected_text", pa.large_string()),
+        pa.field("chosen_layer", pa.int64()),
+        pa.field("rejected_layer", pa.int64()),
+        pa.field("weight", pa.float64()),
+    ])
+    return Dataset(pa.Table.from_pylist(rows, schema=schema))
 
 
 def assert_source_split_isolation(dataset_dict: DatasetDict) -> None:
@@ -186,7 +217,10 @@ def flatten_pairwise_dataset(
                 "pair_id": f"{chain['id']}__pair_{items.index(left_item)}_{items.index(right_item)}",
                 "source_id": str(chain["id"]),
                 "dataset_name": chain.get("dataset_name"),
-                "source_original_ids": list(chain.get("source_original_ids", [])),
+                "source_original_ids": [
+                    str(original_id)
+                    for original_id in chain.get("source_original_ids", [])
+                ],
                 "chosen_id": chosen["candidate_id"],
                 "rejected_id": rejected["candidate_id"],
                 "chosen_text": chosen["text"],
@@ -200,7 +234,7 @@ def flatten_pairwise_dataset(
 
     if not rows:
         raise ValueError("No unequal-label pairwise rows could be constructed")
-    return Dataset.from_list(rows)
+    return _pairwise_dataset_from_rows(rows)
 
 
 def flatten_dataset_dict(

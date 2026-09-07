@@ -1,5 +1,6 @@
 # This script has been co-created, refactored, and cleaned using GPT 5.6.
 import gc
+import json
 import os
 import time
 from typing import Optional
@@ -20,6 +21,82 @@ from .utils import (
 )
 
 
+TRAINER_CHECKPOINT_CONFIG = "fe_trainer_checkpoint.json"
+
+
+def write_trainer_checkpoint_metadata(
+    *,
+    checkpoint_dir: str,
+    model_name: str,
+    pooling: str,
+    max_seq_len: int,
+    objective: str,
+) -> None:
+    """Write the information needed to evaluate a standard Trainer checkpoint."""
+    with open(
+        os.path.join(checkpoint_dir, TRAINER_CHECKPOINT_CONFIG),
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(
+            {
+                "schema_version": 1,
+                "model_name": model_name,
+                "pooling": pooling,
+                "max_seq_len": max_seq_len,
+                "objective": objective,
+            },
+            handle,
+            indent=2,
+        )
+
+
+def _load_trainer_checkpoint(
+    checkpoint_dir: str,
+    *,
+    attn_implementation: str,
+    param_dtype: Optional[torch.dtype],
+    map_location: str,
+) -> FEModel:
+    metadata_path = os.path.join(checkpoint_dir, TRAINER_CHECKPOINT_CONFIG)
+    with open(metadata_path, encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    if metadata.get("schema_version") != 1:
+        raise ValueError(f"Unsupported Trainer checkpoint metadata: {metadata_path}")
+    model_name = metadata.get("model_name")
+    pooling = metadata.get("pooling")
+    if not isinstance(model_name, str) or not model_name:
+        raise ValueError("Trainer checkpoint metadata is missing model_name")
+    if not isinstance(pooling, str) or not pooling:
+        raise ValueError("Trainer checkpoint metadata is missing pooling")
+
+    safe_path = os.path.join(checkpoint_dir, "model.safetensors")
+    torch_path = os.path.join(checkpoint_dir, "pytorch_model.bin")
+    if os.path.exists(safe_path):
+        from safetensors.torch import load_file
+
+        state_dict = load_file(safe_path, device=map_location)
+    elif os.path.exists(torch_path):
+        state_dict = torch.load(torch_path, map_location=map_location, weights_only=True)
+    else:
+        raise FileNotFoundError(
+            f"Trainer checkpoint has no model weights: {checkpoint_dir}"
+        )
+    cleaned_state_dict = {
+        strip_known_prefixes(name): tensor for name, tensor in state_dict.items()
+    }
+    if not any(name.startswith("evaluation_head.") for name in cleaned_state_dict):
+        raise ValueError("Trainer checkpoint is missing the FE evaluation head")
+    model = FEModel(
+        model_name=model_name,
+        attn_implementation=attn_implementation,
+        param_dtype=param_dtype,
+        pooling=pooling,
+    )
+    model.load_state_dict(cleaned_state_dict, strict=True)
+    return model
+
+
 def load_fe_model(
     final_dir: str,
     attn_implementation: str = "sdpa",
@@ -33,6 +110,15 @@ def load_fe_model(
             final_dir,
             attn_implementation=attn_implementation,
             param_dtype=param_dtype,
+        )
+
+    trainer_metadata_path = os.path.join(final_dir, TRAINER_CHECKPOINT_CONFIG)
+    if os.path.exists(trainer_metadata_path):
+        return _load_trainer_checkpoint(
+            final_dir,
+            attn_implementation=attn_implementation,
+            param_dtype=param_dtype,
+            map_location=map_location,
         )
 
     head_path = os.path.join(final_dir, "fe_head.pt")

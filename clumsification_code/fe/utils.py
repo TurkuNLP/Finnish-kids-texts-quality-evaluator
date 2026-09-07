@@ -1,5 +1,7 @@
 # This script has been co-created, refactored, and cleaned using GPT 5.6.
 import logging
+import os
+import warnings
 from typing import Any, Dict
 
 import torch
@@ -9,11 +11,36 @@ import torch.nn as nn
 LOGGER_NAME = "fsdp_fe"
 
 
-def configure_logging() -> logging.Logger:
+def configure_logging(*, rank: int | None = None) -> logging.Logger:
+    """Configure one authoritative log stream for distributed training.
+
+    Rank zero emits ordinary progress and warnings.  Other ranks retain errors
+    (which are useful for diagnosing a failed worker) but suppress duplicate
+    informational logs, library warnings, and Python warnings.
+    """
+    if rank is None:
+        rank = int(os.environ.get("RANK", "0"))
+    is_main_process = rank == 0
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        level=logging.INFO,
+        level=logging.INFO if is_main_process else logging.ERROR,
+        force=True,
     )
+    if not is_main_process:
+        warnings.filterwarnings("ignore")
+        for library_name in ("transformers", "datasets", "accelerate", "torch"):
+            logging.getLogger(library_name).setLevel(logging.ERROR)
+        # Transformers owns a non-propagating stderr handler, so lowering the
+        # ordinary Python logger alone would still leave duplicate worker logs.
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+        try:
+            from datasets.utils import logging as datasets_logging
+
+            datasets_logging.set_verbosity_error()
+        except ImportError:
+            pass
     return logging.getLogger(LOGGER_NAME)
 
 

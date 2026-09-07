@@ -15,6 +15,7 @@ import pyarrow as pa
 from datasets import Dataset, DatasetDict, load_from_disk
 
 from clumsification_code.data.candidate_identity import make_original_candidate_id
+from clumsification_code.data.partitioning import PARTITION_FIELD
 from clumsification_code.data.repository import DatasetRepository
 from clumsification_code.data.schemas import COMPOSITION_POLICIES, HFBuildSpec, PAIR_POLICIES
 from clumsification_code.data.splitting import (
@@ -337,6 +338,45 @@ def _downsample_dataset_dict(
     })
 
 
+def _partitioned_split_ids(
+    repositories: dict[str, DatasetRepository],
+    *,
+    train_partitions: tuple[int, ...],
+) -> dict[str, dict[str, set[str]]]:
+    """Select fixed source partitions for a nested training subset."""
+    requested_train_labels = {f"train_{index:02d}" for index in train_partitions}
+    result = {
+        split: {dataset_name: set() for dataset_name in repositories}
+        for split in ("train", "dev", "test")
+    }
+    for dataset_name, repository in repositories.items():
+        for record in repository.read_originals():
+            partition = record.metadata.get(PARTITION_FIELD)
+            if not isinstance(partition, str) or not partition:
+                raise ValueError(
+                    f"{dataset_name}:{record.base_text_id} has no valid "
+                    f"{PARTITION_FIELD!r} assignment"
+                )
+            if partition == "dev":
+                result["dev"][dataset_name].add(record.base_text_id)
+            elif partition == "test":
+                result["test"][dataset_name].add(record.base_text_id)
+            elif partition in requested_train_labels:
+                result["train"][dataset_name].add(record.base_text_id)
+            elif partition != "train_remainder" and not partition.startswith("train_"):
+                raise ValueError(
+                    f"{dataset_name}:{record.base_text_id} has unknown partition "
+                    f"{partition!r}"
+                )
+    if any(not result[split][dataset_name] for split in result for dataset_name in repositories):
+        sizes = {
+            split: {name: len(ids) for name, ids in values.items()}
+            for split, values in result.items()
+        }
+        raise ValueError(f"Partition selection produced an empty required split: {sizes}")
+    return result
+
+
 def create_formatted_dataset_dict(
     dataset_names: list[str],
     max_layers: Optional[int] = None,
@@ -359,6 +399,7 @@ def create_formatted_dataset_dict(
     include_layers: Optional[list[int]] = None,
     pair_policy: str = "none",
     score_run_ids: Optional[list[str]] = None,
+    train_partitions: Optional[list[int]] = None,
 ):
     """Build source-isolated HF splits from manifests and parent links."""
     if not dataset_names:
@@ -395,10 +436,25 @@ def create_formatted_dataset_dict(
             }
             for name, groups in groups_by_dataset.items()
         }
-    split_ids = split_original_ids_by_dataset(
-        dataset_names, heldout_ratio, test_ratio_within_heldout, seed,
-        eligible_ids, dataset_root=dataset_root, repositories=repositories,
-    )
+    if train_partitions is not None:
+        normalized_train_partitions = tuple(train_partitions)
+        expected = tuple(range(1, len(normalized_train_partitions) + 1))
+        if normalized_train_partitions != expected:
+            raise ValueError("train_partitions must be the contiguous prefix 1..N")
+        if eligible_ids is not None:
+            raise ValueError(
+                "train_partitions cannot be combined with score-based source filtering"
+            )
+        split_ids = _partitioned_split_ids(
+            repositories, train_partitions=normalized_train_partitions
+        )
+        split_strategy = "canonical_original_partition"
+    else:
+        split_ids = split_original_ids_by_dataset(
+            dataset_names, heldout_ratio, test_ratio_within_heldout, seed,
+            eligible_ids, dataset_root=dataset_root, repositories=repositories,
+        )
+        split_strategy = "canonical_base_text_id_before_composition"
     assert_no_original_id_leakage(split_ids)
     records: dict[str, list[dict[str, Any]]] = {
         name: [] for name in ("train", "dev", "test")
@@ -411,6 +467,11 @@ def create_formatted_dataset_dict(
                     method_weights=method_weights, samples_per_source=samples_per_source,
                     seed=_stable_seed(seed, dataset_name, base_id, composition),
                 )
+                if train_partitions is not None and len(items) < 2:
+                    raise ValueError(
+                        f"Selected source {dataset_name}:{base_id} has no candidate "
+                        "for the requested method/run/layer selection"
+                    )
                 records[split].append(
                     _chain(dataset_name, [base_id], items, f"{dataset_name}:{base_id}")
                 )
@@ -428,7 +489,7 @@ def create_formatted_dataset_dict(
     if downsample_size is not None:
         final = _downsample_dataset_dict(final, downsample_size, seed)
     metadata = {
-        "split_strategy": "canonical_base_text_id_before_composition",
+        "split_strategy": split_strategy,
         "split_original_ids": split_ids_to_metadata(split_ids),
         "score_fields": sorted(discovered_scores),
         "score_run_ids": score_run_ids,
@@ -439,6 +500,7 @@ def create_formatted_dataset_dict(
         "method_weights": method_weights,
         "samples_per_source": samples_per_source,
         "pair_policy": pair_policy,
+        "train_partitions": list(train_partitions or []),
         "num_examples": {split: len(final[split]) for split in final},
         "selected_layer_hashes": {
             dataset_name: {
@@ -493,6 +555,7 @@ def build_hf_dataset(
         composition=spec.composition,
         method_weights=dict(spec.method_weights) or None,
         samples_per_source=spec.samples_per_source,
+        train_partitions=list(spec.train_partitions) or None,
         pair_policy=spec.pair_policy,
         reuse_limit=spec.reuse_limit,
         downsample_size=spec.downsample_size,

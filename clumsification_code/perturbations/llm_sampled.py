@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from typing import Any, Mapping, Sequence
+import math
 
 from clumsification_code.data.io import canonical_json_hash, sha256_file
 
@@ -92,8 +93,8 @@ Required operations:
 {operations}
 
 Requirements:
-- Apply every required operation at least once.
-- Use at least one qualifying change in each of 3 distinct sentences when the source contains that many sentences.
+- Apply every required operation at least once. If an operation is not possible given the source text, then use another operation an additional time.
+- Use at least one qualifying change in each of {max(2, math.floor(len(assignment.edits)/2))} distinct sentences when the source contains that many sentences.
 - Clause-level or discourse-level changes are required; isolated neutral synonym substitutions do not count.
 - Do not add facts, omit propositions, change timeline or polarity, translate, or repair unrelated source errors.
 - Do not copy the illustration text or its entities into the source.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timezone
 import gc
 import re
 from pathlib import Path
@@ -14,6 +15,7 @@ from clumsification_code.data.candidate_identity import (
 )
 from clumsification_code.data.io import canonical_json_hash
 from clumsification_code.data.repository import DatasetRepository
+from clumsification_code.data.partitioning import PARTITION_FIELD
 from clumsification_code.data.schemas import (
     CandidateRecord,
     GenerationSpec,
@@ -36,6 +38,30 @@ class GenerationValidationError(ValueError):
 
 LEGACY_TEXT_BUCKETS = (512, 1024, 2048, 4096, 8192, 16384)
 LEGACY_PROMPT_OVERHEAD = 512
+
+# These fields describe the outcome of a generation attempt rather than its
+# reproducible request configuration.  They must not make a retry of the same
+# layer look incompatible with its original invocation.
+_ATTEMPT_AUDIT_FIELDS = frozenset(
+    {
+        "skipped_over_length_count",
+        "skipped_over_length",
+        "skipped_invalid_output_count",
+        "skipped_invalid_output",
+        "retried_input_count",
+        "retry_attempt_count",
+        "bucket_counts",
+        "retry_history",
+        "retry_round",
+        "unresolved_failure_count",
+        "unresolved_failures",
+    }
+)
+
+
+def _request_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return only the immutable request portion of a persisted config."""
+    return {key: value for key, value in config.items() if key not in _ATTEMPT_AUDIT_FIELDS}
 
 
 def _legacy_bucket_params(text_bucket: int) -> tuple[int, int]:
@@ -283,12 +309,38 @@ class PerturbationGenerationService:
         source_layer: int,
         source_method: str | None,
         source_run_id: str | None,
+        source_partitions: tuple[str, ...] | None = None,
         limit: int | None = None,
     ) -> list[PerturbationInput]:
         if isinstance(source_layer, bool) or not isinstance(source_layer, int) or source_layer < 0:
             raise ValueError("source_layer must be a non-negative integer")
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
             raise ValueError("limit must be a positive integer")
+        selected_partitions = (
+            set(source_partitions) if source_partitions is not None else None
+        )
+        if selected_partitions is not None and (
+            not selected_partitions
+            or any(not isinstance(value, str) or not value for value in selected_partitions)
+        ):
+            raise ValueError("source_partitions must be a non-empty sequence of names")
+        originals = self.repository.read_originals()
+        partition_by_original = {
+            record.base_text_id: record.metadata.get(PARTITION_FIELD)
+            for record in originals
+        }
+
+        def is_selected(base_text_id: str) -> bool:
+            if selected_partitions is None:
+                return True
+            partition = partition_by_original.get(base_text_id)
+            if not isinstance(partition, str) or not partition:
+                raise ValueError(
+                    f"Original source {base_text_id!r} has no valid "
+                    f"{PARTITION_FIELD!r} assignment"
+                )
+            return partition in selected_partitions
+
         if source_layer == 0:
             if source_method is not None or source_run_id is not None:
                 raise ValueError(
@@ -305,7 +357,8 @@ class PerturbationGenerationService:
                     ),
                     metadata={**record.metadata},
                 )
-                for record in self.repository.read_originals()
+                for record in originals
+                if is_selected(record.base_text_id)
             ]
         else:
             if not source_method or not source_run_id:
@@ -325,6 +378,7 @@ class PerturbationGenerationService:
                     metadata={**record.metadata, "candidate_id": record.candidate_id},
                 )
                 for record in self.repository.read_candidates(entry)
+                if is_selected(record.base_text_id)
             ]
         selected = items if limit is None else items[:limit]
         if not selected:
@@ -341,12 +395,17 @@ class PerturbationGenerationService:
         run_id: str = "default",
         target_layer: int | None = None,
         config: dict[str, Any] | None = None,
+        source_partitions: tuple[str, ...] | None = None,
         limit: int | None = None,
         overwrite: bool = False,
+        retry_failed: bool = False,
     ) -> LayerManifestEntry:
         resolved_source_run_id = None if source_layer == 0 else source_run_id
         resolved_target = source_layer + 1 if target_layer is None else int(target_layer)
         method_config = dict(config or {})
+        if source_partitions is not None and isinstance(source_partitions, str):
+            raise ValueError("source_partitions must be a sequence of names, not a string")
+        normalized_partitions = tuple(source_partitions or ())
         GenerationSpec(
             method=method,
             run_id=run_id,
@@ -355,6 +414,7 @@ class PerturbationGenerationService:
             source_run_id=resolved_source_run_id,
             target_layer=resolved_target,
             limit=limit,
+            source_partitions=normalized_partitions,
             config=method_config,
         ).validate()
         spec = get_method_spec(method)
@@ -374,6 +434,8 @@ class PerturbationGenerationService:
         persisted_config = {
             key: value for key, value in method_config.items() if key != "store"
         }
+        if normalized_partitions:
+            persisted_config["source_partitions"] = list(normalized_partitions)
         if spec.perturbation_source == "LLM":
             max_model_len = int(method_config.get("max_model_len", 32768))
             if max_model_len < 1:
@@ -392,22 +454,66 @@ class PerturbationGenerationService:
             persisted_config["max_attempts"] = max_attempts
         canonical_json_hash(persisted_config)
         destination = self.repository.layer_path(method, run_id, resolved_target)
-        if not overwrite:
-            identity = (method, run_id, resolved_target)
-            if destination.exists() or any(
-                entry.identity == identity for entry in self.repository.list_layers()
-            ):
+        identity = (method, run_id, resolved_target)
+        existing_entry = next(
+            (entry for entry in self.repository.list_layers() if entry.identity == identity),
+            None,
+        )
+        if retry_failed and overwrite:
+            raise ValueError("retry_failed and overwrite cannot be used together")
+        if not retry_failed:
+            if destination.exists() or existing_entry is not None:
                 raise FileExistsError(
                     "Canonical generation destination already exists for "
                     f"method={method!r}, run_id={run_id!r}, "
                     f"target_layer={resolved_target}"
                 )
-        items = self.load_source_items(
+        elif existing_entry is None or not destination.exists():
+            raise FileNotFoundError(
+                "retry_failed requires an existing canonical generation layer for "
+                f"method={method!r}, run_id={run_id!r}, target_layer={resolved_target}"
+            )
+        elif (
+            existing_entry.source_layer != source_layer
+            or existing_entry.source_method != source_method
+            or existing_entry.source_run_id != resolved_source_run_id
+            or _request_config(existing_entry.config) != _request_config(persisted_config)
+        ):
+            raise ValueError(
+                "retry_failed request does not match the existing layer's immutable "
+                "source or generation configuration"
+            )
+
+        all_items = self.load_source_items(
             source_layer=source_layer,
             source_method=source_method,
             source_run_id=resolved_source_run_id,
+            source_partitions=normalized_partitions or None,
             limit=limit,
         )
+        existing_candidates: list[CandidateRecord] = []
+        retry_round = 0
+        if retry_failed:
+            assert existing_entry is not None
+            if existing_entry.input_count != len(all_items):
+                raise ValueError(
+                    "retry_failed source selection does not match the existing layer's "
+                    "input count (check --source-partitions and --limit)"
+                )
+            existing_candidates = list(self.repository.read_candidates(existing_entry))
+            existing_parent_ids = [record.parent_candidate_id for record in existing_candidates]
+            if len(existing_parent_ids) != len(set(existing_parent_ids)):
+                raise ValueError("Existing retry layer has duplicate parent candidates")
+            retry_round = len(existing_entry.config.get("retry_history", [])) + 1
+            # A retry must explore a different deterministic trajectory while the
+            # persisted request seed remains the stable identity of the layer.
+            method_config["seed"] = int(method_config["seed"]) + retry_round
+        existing_parent_ids = {record.parent_candidate_id for record in existing_candidates}
+        items = [
+            item for item in all_items if str(item.candidate_id) not in existing_parent_ids
+        ]
+        if retry_failed and not items:
+            return existing_entry
         parent_base_ids: dict[str, str] = {}
         for item in items:
             candidate_id = item.candidate_id
@@ -480,6 +586,10 @@ class PerturbationGenerationService:
                 for parent_id in retry_parent_ids:
                     retry_counts[parent_id] += 1
         candidate_counts: dict[str, int] = defaultdict(int)
+        for record in existing_candidates:
+            candidate_counts[record.parent_candidate_id] = max(
+                candidate_counts[record.parent_candidate_id], record.candidate_index + 1
+            )
         candidates = []
         skipped_over_length: list[dict[str, Any]] = []
         skipped_invalid_output: list[dict[str, Any]] = []
@@ -626,8 +736,9 @@ class PerturbationGenerationService:
             entry["parent_candidate_id"]
             for entry in [*skipped_over_length, *skipped_invalid_output]
         }
-        if set(candidate_counts) | skipped_ids != set(parent_base_ids):
-            missing = len(set(parent_base_ids) - set(candidate_counts) - skipped_ids)
+        expected_parent_ids = {str(item.candidate_id) for item in all_items}
+        if set(candidate_counts) | skipped_ids != expected_parent_ids:
+            missing = len(expected_parent_ids - set(candidate_counts) - skipped_ids)
             raise ValueError(f"Generated layer has no candidate for {missing} input parent(s)")
         if skipped_over_length:
             persisted_config["skipped_over_length_count"] = len(skipped_over_length)
@@ -642,8 +753,27 @@ class PerturbationGenerationService:
             persisted_config["retry_attempt_count"] = sum(retry_counts.values())
         if spec.perturbation_source == "LLM" and context_bucket_counts:
             persisted_config["bucket_counts"] = dict(context_bucket_counts)
+        merged_candidates = [*existing_candidates, *candidates]
+        if retry_failed:
+            retry_history = list(existing_entry.config.get("retry_history", []))
+            retry_history.append(
+                {
+                    "round": retry_round,
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "effective_seed": int(method_config["seed"]),
+                    "attempted_input_count": len(items),
+                    "recovered_output_count": len(candidates),
+                    "remaining_failure_count": len(skipped_ids),
+                }
+            )
+            persisted_config["retry_history"] = retry_history
+            persisted_config["retry_round"] = retry_round
+            unresolved = [*skipped_over_length, *skipped_invalid_output]
+            if unresolved:
+                persisted_config["unresolved_failure_count"] = len(unresolved)
+                persisted_config["unresolved_failures"] = unresolved
         return self.repository.write_candidate_layer(
-            candidates,
+            merged_candidates,
             method=method,
             run_id=run_id,
             target_layer=resolved_target,
@@ -651,8 +781,8 @@ class PerturbationGenerationService:
             source_method=source_method,
             source_run_id=resolved_source_run_id,
             config=persisted_config,
-            input_count=len(items),
-            overwrite=overwrite,
+            input_count=len(all_items),
+            overwrite=overwrite or retry_failed,
         )
 
 
@@ -662,6 +792,7 @@ def load_source_items(
     source_layer: int,
     source_method: str | None,
     source_run_id: str | None = None,
+    source_partitions: tuple[str, ...] | None = None,
     limit: int | None = None,
     dataset_root: str | Path = "data/custom_datasets",
 ) -> list[PerturbationInput]:
@@ -670,6 +801,7 @@ def load_source_items(
         source_layer=source_layer,
         source_method=source_method,
         source_run_id=source_run_id,
+        source_partitions=source_partitions,
         limit=limit,
     )
 
@@ -684,8 +816,10 @@ def generate_layer(
     run_id: str = "default",
     target_layer: int | None = None,
     config: dict[str, Any] | None = None,
+    source_partitions: tuple[str, ...] | None = None,
     limit: int | None = None,
     overwrite: bool = False,
+    retry_failed: bool = False,
     dataset_root: str | Path = "data/custom_datasets",
     llm_runner: ChatRunner | None = None,
 ) -> Path:
@@ -700,8 +834,10 @@ def generate_layer(
         run_id=run_id,
         target_layer=target_layer,
         config=config,
+        source_partitions=source_partitions,
         limit=limit,
         overwrite=overwrite,
+        retry_failed=retry_failed,
     )
     return repository.dataset_dir / entry.path
 

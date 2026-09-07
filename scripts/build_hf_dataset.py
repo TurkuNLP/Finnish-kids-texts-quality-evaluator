@@ -48,6 +48,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-per-source", type=int, default=1)
     parser.add_argument("--pair-policy", choices=sorted(PAIR_POLICIES), default="none")
     parser.add_argument("--reuse-limit", type=int, default=5)
+    parser.add_argument(
+        "--train-partitions",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Use fixed dev/test partitions plus this contiguous train-block prefix.",
+    )
     parser.add_argument("--score-names", nargs="+")
     parser.add_argument("--score-run-ids", nargs="+")
     parser.add_argument("--downsample-size", type=int)
@@ -61,7 +68,10 @@ def parse_args() -> argparse.Namespace:
 def _spec_from_args(args: argparse.Namespace) -> HFBuildSpec:
     if args.config:
         conflicting = [
-            name for name in ("datasets", "output_name", "include_methods", "include_runs", "include_layers")
+            name for name in (
+                "datasets", "output_name", "include_methods", "include_runs",
+                "include_layers", "train_partitions",
+            )
             if getattr(args, name) is not None
         ]
         if conflicting:
@@ -84,6 +94,7 @@ def _spec_from_args(args: argparse.Namespace) -> HFBuildSpec:
         "samples_per_source": args.samples_per_source,
         "pair_policy": args.pair_policy,
         "reuse_limit": args.reuse_limit,
+        "train_partitions": args.train_partitions or [],
         "downsample_size": args.downsample_size,
         "heldout_ratio": args.heldout_ratio,
         "test_ratio_within_heldout": args.test_ratio_within_heldout,

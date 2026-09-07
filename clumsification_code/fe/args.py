@@ -108,11 +108,59 @@ def parse_train_args():
     parser.add_argument("--attn_implementation", type=str, default="sdpa",
                         choices=["auto", "flash_attention_2", "sdpa", "eager"])
     parser.add_argument("--logging_steps", type=int, default=10)
+    parser.add_argument(
+        "--save-every-examples",
+        type=int,
+        default=None,
+        help=(
+            "Save each checkpoint after approximately this many globally "
+            "processed training examples. Requires --eval-every-examples."
+        ),
+    )
+    parser.add_argument(
+        "--eval-every-examples",
+        type=int,
+        default=None,
+        help=(
+            "Evaluate after approximately this many globally processed "
+            "training examples. Requires --save-every-examples."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-checkpoints",
+        type=int,
+        default=None,
+        help=(
+            "Stop after this many consecutive non-improving saved checkpoints. "
+            "Requires example-based save and evaluation intervals."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum absolute validation-metric improvement that resets patience.",
+    )
+    parser.add_argument(
+        "--early-stopping-min-examples",
+        type=int,
+        default=0,
+        help="Do not begin early-stopping comparisons before this many examples.",
+    )
     parser.add_argument("--save_strategy", type=str, default="epoch",
                         choices=["no", "steps", "epoch"])
     parser.add_argument("--eval_strategy", type=str, default="epoch",
                         choices=["no", "steps", "epoch"])
     parser.add_argument("--save_total_limit", type=int, default=2)
+    parser.add_argument(
+        "--save-only-model",
+        action="store_true",
+        help=(
+            "Save model weights and FE checkpoint metadata without optimizer "
+            "or scheduler state. Use this when retaining checkpoints for "
+            "evaluation rather than training resumption."
+        ),
+    )
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
     parser.add_argument("--parallelism", choices=["ddp", "fsdp"], default="ddp",
                         help="Use ordinary Trainer DDP by default, or opt into FSDP.")
@@ -136,6 +184,12 @@ def parse_train_args():
     args = parser.parse_args()
     if args.parallelism == "fsdp" and not args.fsdp_layer_cls:
         parser.error("--fsdp-layer-cls is required when --parallelism fsdp.")
+    if args.early_stopping_checkpoints is not None and args.early_stopping_checkpoints < 1:
+        parser.error("--early-stopping-checkpoints must be at least 1")
+    if args.early_stopping_threshold < 0:
+        parser.error("--early-stopping-threshold must be non-negative")
+    if args.early_stopping_min_examples < 0:
+        parser.error("--early-stopping-min-examples must be non-negative")
     if args.loss is None:
         args.loss = "huber" if args.training_method == "regression" else "logistic"
     ranking_losses = {

@@ -490,13 +490,14 @@ class GenerationSpec:
     source_run_id: str | None = None
     target_layer: int | None = None
     limit: int | None = None
+    source_partitions: tuple[str, ...] = ()
     config: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "GenerationSpec":
         allowed = {
             "method", "run_id", "source_layer", "source_method", "source_run_id",
-            "target_layer", "limit", "config",
+            "target_layer", "limit", "source_partitions", "config",
         }
         _reject_unknown(value, allowed, "generation")
         if "method" not in value:
@@ -509,6 +510,9 @@ class GenerationSpec:
             source_run_id=value.get("source_run_id"),
             target_layer=value.get("target_layer"),
             limit=value.get("limit"),
+            source_partitions=_string_tuple(
+                value.get("source_partitions"), "generation.source_partitions"
+            ),
             config=_mapping(value.get("config"), "generation.config"),
         )
         result.validate()
@@ -529,6 +533,7 @@ class GenerationSpec:
             raise ValueError("Perturbed generation inputs require source_method and source_run_id")
         if self.limit is not None:
             _integer(self.limit, "generation.limit", minimum=1)
+        _string_tuple(self.source_partitions, "generation.source_partitions")
 
 
 @dataclass(frozen=True)
@@ -545,6 +550,7 @@ class HFBuildSpec:
     samples_per_source: int = 1
     pair_policy: str = "none"
     reuse_limit: int = 5
+    train_partitions: tuple[int, ...] = ()
     downsample_size: int | None = None
     heldout_ratio: float = 0.3
     test_ratio_within_heldout: float = 0.5
@@ -557,7 +563,7 @@ class HFBuildSpec:
         allowed = {
             "output_name", "datasets", "include_methods", "include_runs",
             "include_layers", "composition", "method_weights", "samples_per_source",
-            "pair_policy", "reuse_limit", "downsample_size", "heldout_ratio",
+            "pair_policy", "reuse_limit", "train_partitions", "downsample_size", "heldout_ratio",
             "test_ratio_within_heldout", "score_names", "seed",
             "score_run_ids",
         }
@@ -579,6 +585,7 @@ class HFBuildSpec:
             samples_per_source=value.get("samples_per_source", 1),
             pair_policy=value.get("pair_policy", "none"),
             reuse_limit=value.get("reuse_limit", 5),
+            train_partitions=tuple(value.get("train_partitions", ())),
             downsample_size=value.get("downsample_size"),
             heldout_ratio=value.get("heldout_ratio", 0.3),
             test_ratio_within_heldout=value.get("test_ratio_within_heldout", 0.5),
@@ -601,6 +608,16 @@ class HFBuildSpec:
             raise ValueError("hf.include_layers must not contain duplicates")
         _integer(self.samples_per_source, "hf.samples_per_source", minimum=1)
         _integer(self.reuse_limit, "hf.reuse_limit", minimum=1)
+        for partition in self.train_partitions:
+            _integer(partition, "hf.train_partitions", minimum=1)
+        if len(self.train_partitions) != len(set(self.train_partitions)):
+            raise ValueError("hf.train_partitions must not contain duplicates")
+        if self.train_partitions and self.train_partitions != tuple(
+            range(1, len(self.train_partitions) + 1)
+        ):
+            raise ValueError("hf.train_partitions must be the contiguous prefix 1..N")
+        if self.train_partitions and self.downsample_size is not None:
+            raise ValueError("hf.downsample_size cannot be combined with hf.train_partitions")
         if self.downsample_size is not None:
             _integer(self.downsample_size, "hf.downsample_size", minimum=3)
         if (

@@ -61,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--operation", default=None)
     parser.add_argument("--operations", nargs="+", default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--source-partitions",
+        nargs="+",
+        default=None,
+        help="Generate only sources assigned to these canonical partitions.",
+    )
     parser.add_argument("--allow-unchanged", action="store_true", default=None)
     parser.add_argument(
         "--max-retries",
@@ -75,9 +81,19 @@ def parse_args() -> argparse.Namespace:
         help="Per-entry attempts for traditional perturbations (default: 100).",
     )
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help=(
+            "Retry only sources still missing a candidate in the existing layer, "
+            "then merge recovered candidates into that layer."
+        ),
+    )
     args = parser.parse_args()
     if args.source_layer < 0:
         parser.error("--source-layer must be non-negative")
+    if args.overwrite and args.retry_failed:
+        parser.error("--overwrite and --retry-failed cannot be used together")
     return args
 
 
@@ -116,8 +132,12 @@ def main() -> None:
         run_id=args.run_id,
         target_layer=args.target_layer,
         config=config,
+        source_partitions=(
+            tuple(args.source_partitions) if args.source_partitions is not None else None
+        ),
         limit=args.limit,
         overwrite=args.overwrite,
+        retry_failed=args.retry_failed,
     )
     print(f"Wrote perturbation layer: {output}")
 

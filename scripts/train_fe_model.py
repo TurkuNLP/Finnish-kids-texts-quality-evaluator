@@ -9,15 +9,22 @@ import inspect
 import os
 import time
 
+# Avoid the tokenizer library's multi-process advisory on every DDP worker.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import torch
 import torch.distributed as dist
-from transformers import AutoTokenizer, Trainer, TrainingArguments, set_seed
+from transformers import AutoTokenizer, Trainer, TrainerCallback, TrainingArguments, set_seed
 
 from clumsification_code.data.hf_dataset import load_formatted_dataset_dict
 from clumsification_code.data.io import default_formatted_dataset_path
 from clumsification_code.data.flattening import flatten_dataset_dict
 from clumsification_code.fe.args import parse_train_args
-from clumsification_code.fe.checkpointing import save_final_model
+from clumsification_code.fe.checkpointing import (
+    save_final_model,
+    write_trainer_checkpoint_metadata,
+)
+from clumsification_code.fe.early_stopping import CheckpointEarlyStoppingCallback
 from clumsification_code.fe.collators import (
     BinaryCollator,
     PairwiseCollator,
@@ -26,6 +33,7 @@ from clumsification_code.fe.collators import (
 from clumsification_code.fe.modeling import FEModel
 from clumsification_code.fe.metrics import binary_metrics, pairwise_metrics, regression_metrics
 from clumsification_code.fe.regression_data import build_regression_dataset_dict
+from clumsification_code.fe.scheduling import ExampleSchedule, resolve_example_schedule
 from clumsification_code.fe.utils import (
     configure_logging,
     get_preferred_param_dtype,
@@ -34,6 +42,33 @@ from clumsification_code.fe.utils import (
 
 
 os.environ["WANDB_MODE"] = "disabled"
+
+
+class FETrainerCheckpointCallback(TrainerCallback):
+    """Make standard Trainer checkpoints loadable by FE evaluation clients."""
+
+    def __init__(self, *, model_name: str, pooling: str, max_seq_len: int, objective: str):
+        self.model_name = model_name
+        self.pooling = pooling
+        self.max_seq_len = max_seq_len
+        self.objective = objective
+
+    def on_save(self, args, state, control, **kwargs):
+        del kwargs
+        if state.is_world_process_zero:
+            write_trainer_checkpoint_metadata(
+                checkpoint_dir=os.path.join(args.output_dir, f"checkpoint-{state.global_step}"),
+                model_name=self.model_name,
+                pooling=self.pooling,
+                max_seq_len=self.max_seq_len,
+                objective=self.objective,
+            )
+        # Trainer has completed the atomic checkpoint save on every rank before
+        # it invokes on_save.  Keep ranks aligned until the FE metadata exists,
+        # so every retained checkpoint is immediately evaluation-loadable.
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+        return control
 
 
 def _compat_kwargs(callable_obj, kwargs: dict) -> dict:
@@ -54,7 +89,11 @@ def build_training_arguments(
     use_bf16: bool,
     use_fp16: bool,
     world_size: int,
+    rank: int = 0,
+    example_schedule: ExampleSchedule | None = None,
 ):
+    save_strategy = "steps" if example_schedule is not None else args.save_strategy
+    eval_strategy = "steps" if example_schedule is not None else args.eval_strategy
     training_kwargs = dict(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
@@ -68,9 +107,10 @@ def build_training_arguments(
         logging_steps=args.logging_steps,
         logging_strategy="steps",
         logging_first_step=True,
-        save_strategy=args.save_strategy,
-        eval_strategy=args.eval_strategy,
+        save_strategy=save_strategy,
+        eval_strategy=eval_strategy,
         save_total_limit=args.save_total_limit,
+        save_only_model=getattr(args, "save_only_model", False),
         dataloader_num_workers=args.dataloader_num_workers,
         dataloader_pin_memory=use_cuda,
         bf16=use_bf16,
@@ -78,14 +118,23 @@ def build_training_arguments(
         report_to=[],
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
-        disable_tqdm=False,
+        # Trainer's progress callback is process-local; make global rank zero
+        # the only writer even when a job spans multiple nodes.
+        disable_tqdm=rank != 0,
     )
+    if example_schedule is not None:
+        training_kwargs.update(
+            {
+                "save_steps": example_schedule.save_steps,
+                "eval_steps": example_schedule.eval_steps,
+            }
+        )
 
     # Loading the best model requires evaluation and checkpoint saving to use
     # compatible strategies. Pairwise runs may deliberately evaluate during
     # training without saving intermediate checkpoints: save_final_model()
     # persists the final model after trainer.train() in that workflow.
-    load_best_model_at_end = args.save_strategy != "no"
+    load_best_model_at_end = save_strategy != "no"
     training_kwargs["load_best_model_at_end"] = load_best_model_at_end
 
     if load_best_model_at_end:
@@ -99,12 +148,12 @@ def build_training_arguments(
                 "greater_is_better": True,
             }
         )
-    elif args.eval_strategy != "no" and args.save_strategy == "no":
+    elif eval_strategy != "no" and save_strategy == "no":
         logger.info(
             "Intermediate checkpoint saving is disabled; validation will run "
             "with eval_strategy=%s, and the final model will be saved without "
             "best-checkpoint reloading.",
-            args.eval_strategy,
+            eval_strategy,
         )
 
     if args.parallelism == "fsdp":
@@ -156,16 +205,27 @@ def resolve_formatted_dataset_path(args) -> str:
 
 
 def main():
-    configure_logging()
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    configure_logging(rank=rank)
 
     args = parse_train_args()
     set_seed(args.seed)
 
     eval_only = getattr(args, "eval_only", False)
-
-    rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    example_schedule = resolve_example_schedule(
+        save_every_examples=args.save_every_examples,
+        eval_every_examples=args.eval_every_examples,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        world_size=world_size,
+    )
+    if args.early_stopping_checkpoints is not None and example_schedule is None:
+        raise ValueError(
+            "--early-stopping-checkpoints requires --save-every-examples and "
+            "--eval-every-examples"
+        )
 
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -184,6 +244,16 @@ def main():
         logger.info(f"Loading formatted dataset from: {dataset_path}")
         logger.info(f"training_method={args.training_method}")
         logger.info(f"pair_policy={args.pair_policy}")
+        if example_schedule is not None:
+            logger.info(
+                "Example schedule: global_batch=%d, eval_steps=%d "
+                "(~%d examples), save_steps=%d (~%d examples)",
+                example_schedule.global_batch_size,
+                example_schedule.eval_steps,
+                example_schedule.effective_eval_examples,
+                example_schedule.save_steps,
+                example_schedule.effective_save_examples,
+            )
 
         if eval_only:
             logger.info(
@@ -319,6 +389,8 @@ def main():
         use_bf16=use_bf16,
         use_fp16=use_fp16,
         world_size=world_size,
+        rank=rank,
+        example_schedule=example_schedule,
     )
 
     trainer_common = {
@@ -335,6 +407,30 @@ def main():
         trainer_common["compute_metrics"] = pairwise_metrics
     else:
         trainer_common["compute_metrics"] = binary_metrics
+    callbacks = [
+        FETrainerCheckpointCallback(
+            model_name=args.model_name,
+            pooling=model.pooling,
+            max_seq_len=args.max_seq_len,
+            objective=args.training_method,
+        )
+    ]
+    if args.early_stopping_checkpoints is not None:
+        metric_name = {
+            "regression": "eval_spearman",
+            "pairwise": "eval_pairwise_accuracy",
+            "binary": "eval_binary_accuracy",
+        }[args.training_method]
+        callbacks.append(
+            CheckpointEarlyStoppingCallback(
+                metric_name=metric_name,
+                patience=args.early_stopping_checkpoints,
+                threshold=args.early_stopping_threshold,
+                min_examples=args.early_stopping_min_examples,
+                global_batch_size=example_schedule.global_batch_size,
+            )
+        )
+    trainer_common["callbacks"] = callbacks
     if "processing_class" not in inspect.signature(Trainer).parameters:
         trainer_common["tokenizer"] = trainer_common.pop("processing_class")
     trainer = Trainer(**_compat_kwargs(Trainer, trainer_common))
