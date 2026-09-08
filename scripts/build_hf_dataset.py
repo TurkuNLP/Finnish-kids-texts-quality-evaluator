@@ -72,7 +72,7 @@ def _spec_from_args(args: argparse.Namespace) -> HFBuildSpec:
                 "datasets", "output_name", "include_methods", "include_runs",
                 "include_layers", "train_partitions",
             )
-            if getattr(args, name) is not None
+            if getattr(args, name, None) is not None
         ]
         if conflicting:
             raise ValueError(f"--config cannot be combined with: {', '.join('--' + name.replace('_', '-') for name in conflicting)}")
@@ -94,7 +94,7 @@ def _spec_from_args(args: argparse.Namespace) -> HFBuildSpec:
         "samples_per_source": args.samples_per_source,
         "pair_policy": args.pair_policy,
         "reuse_limit": args.reuse_limit,
-        "train_partitions": args.train_partitions or [],
+        "train_partitions": getattr(args, "train_partitions", None) or [],
         "downsample_size": args.downsample_size,
         "heldout_ratio": args.heldout_ratio,
         "test_ratio_within_heldout": args.test_ratio_within_heldout,

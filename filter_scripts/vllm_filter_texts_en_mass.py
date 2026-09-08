@@ -1,11 +1,8 @@
 # This script has been co-created, refactored, and cleaned using GPT 5.6.
-from vllm import LLM, SamplingParams
-from vllm.config import ReasoningConfig
 import json
-import sys
-import torch
 import re
 import argparse
+import os
 
 
 def parse_args():
@@ -36,6 +33,19 @@ def parse_args():
         type=int,
         default=None,
         help="Maximum number of dataset examples to process.",
+    )
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=512,
+        help="Number of source rows to classify and checkpoint at a time.",
+    )
+
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Append after previously written output rows from an interrupted run.",
     )
 
     parser.add_argument(
@@ -211,42 +221,98 @@ def apply_chat_template(text_to_analyze: str):
         },
     ]
 
-def load_jsonl(path, limit=None):
-    data = []
-
+def count_jsonl_rows(path):
+    """Validate and count non-empty JSONL rows without retaining them."""
+    count = 0
     with open(path, "r", encoding="utf-8") as reader:
         for line_num, line in enumerate(reader, start=1):
-            line = line.strip()
-
-            if not line:
+            if not line.strip():
                 continue
-
             try:
-                data.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"Invalid JSON on line {line_num} of {path}: {e}"
-                ) from e
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON on line {line_num} of {path}: {exc}") from exc
+            if not isinstance(value, dict):
+                raise ValueError(f"Expected a JSON object on line {line_num} of {path}")
+            count += 1
+    return count
 
-            if limit is not None and len(data) >= limit:
+
+def iter_jsonl_batches(path, *, batch_size, limit, skip_rows):
+    """Yield validated input rows after an already-checkpointed prefix."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    seen = 0
+    batch = []
+    with open(path, "r", encoding="utf-8") as reader:
+        for line_num, line in enumerate(reader, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON on line {line_num} of {path}: {exc}") from exc
+            if not isinstance(value, dict):
+                raise ValueError(f"Expected a JSON object on line {line_num} of {path}")
+            if not isinstance(value.get("text"), str):
+                raise ValueError(f"Expected a string text field on line {line_num} of {path}")
+            if limit is not None and seen >= limit:
                 break
+            seen += 1
+            if seen <= skip_rows:
+                continue
+            batch.append(value)
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch
+    if skip_rows > seen:
+        raise ValueError(
+            "Resume output has more rows than the selected input range; "
+            "refuse to append to a mismatched output file"
+        )
 
-    return data
+
+def prompt_token_count(tokenizer, messages) -> int:
+    """Count a rendered request with the model's own chat template."""
+    try:
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+    except TypeError:
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+    if isinstance(encoded, dict):
+        encoded = encoded["input_ids"]
+    return len(encoded)
 
 
 
 def main():
+    # Keep vLLM as a runtime dependency so tokenizer-only validation can run
+    # in the lightweight data-processing environment.
+    import torch
+    from vllm import LLM, SamplingParams
+
     args = parse_args()
+    if args.limit is not None and args.limit < 1:
+        raise ValueError("limit must be at least 1")
 
     print("Arrived")
 
-    ds_loaded = load_jsonl(path=args.ds_name, limit=args.limit)
-
-    prompts = []
-    for x in ds_loaded:
-        prompts.append(apply_chat_template(x['text']))
-
-    print("Loaded")
+    if args.resume:
+        if not os.path.exists(args.output_path):
+            raise FileNotFoundError(f"Cannot resume; output does not exist: {args.output_path}")
+        completed_rows = count_jsonl_rows(args.output_path)
+    else:
+        completed_rows = 0
 
 
     tensor_parallel_size = torch.cuda.device_count()
@@ -270,26 +336,66 @@ def main():
         temperature=args.temperature,
     )
 
-    outputs = llm.chat(
-        messages=prompts,
-        sampling_params=sampling_params,
-        chat_template_kwargs={
-            "enable_thinking": False,
-        },
-    )
+    tokenizer = llm.get_tokenizer()
+    max_prompt_tokens = args.max_model_len - max_tokens
+    if max_prompt_tokens < 1:
+        raise ValueError(
+            "max_model_len must exceed thinking_token_budget + "
+            "max_final_answer_tokens"
+        )
+    mode = "a" if args.resume else "w"
+    processed = completed_rows
+    eligible_total = 0
+    oversized_total = 0
+    with open(args.output_path, mode, encoding="utf-8") as writer:
+        for source_rows in iter_jsonl_batches(
+            args.ds_name,
+            batch_size=args.batch_size,
+            limit=args.limit,
+            skip_rows=completed_rows,
+        ):
+            prompts = [apply_chat_template(row["text"]) for row in source_rows]
+            # vLLM rejects an entire request batch if even one prompt cannot
+            # leave room for generation. Preserve that source row with a null
+            # decision and submit only context-safe requests.
+            eligible_indices = []
+            oversized_indices = []
+            eligible_prompts = []
+            for index, prompt in enumerate(prompts):
+                if prompt_token_count(tokenizer, prompt) > max_prompt_tokens:
+                    oversized_indices.append(index)
+                else:
+                    eligible_indices.append(index)
+                    eligible_prompts.append(prompt)
 
-    to_write = []
-    for i,o in enumerate(outputs):
-        temp_text = o.outputs[0].text
-        temp_text = re.sub(r'Thinking Process:\n\n.*?</think>', '', temp_text, flags=re.DOTALL)
-        temp_text = re.sub(r"\A[\n']+|[\n']+\Z", '', temp_text)
-        tt = ds_loaded[i]
-        tt['passes_filters'] = temp_text
-        to_write.append(tt)
+            decisions = {index: None for index in oversized_indices}
+            if eligible_prompts:
+                outputs = llm.chat(
+                    messages=eligible_prompts,
+                    sampling_params=sampling_params,
+                    chat_template_kwargs={"enable_thinking": False},
+                )
+                for index, output in zip(eligible_indices, outputs, strict=True):
+                    temp_text = output.outputs[0].text
+                    temp_text = re.sub(
+                        r'Thinking Process:\n\n.*?</think>', '', temp_text, flags=re.DOTALL
+                    )
+                    decisions[index] = re.sub(r"\A[\n']+|[\n']+\Z", '', temp_text)
 
-    with open(args.output_path, "w", encoding="utf-8") as writer:
-        for x in to_write:
-            writer.write(json.dumps(x, ensure_ascii=False) + "\n")
+            for index, source_row in enumerate(source_rows):
+                row = dict(source_row)
+                row["passes_filters"] = decisions[index]
+                writer.write(json.dumps(row, ensure_ascii=False) + "\n")
+            writer.flush()
+            os.fsync(writer.fileno())
+            processed += len(source_rows)
+            eligible_total += len(eligible_indices)
+            oversized_total += len(oversized_indices)
+            print(
+                f"Checkpoint: rows={processed}, eligible={eligible_total}, "
+                f"too_long={oversized_total}, max_prompt_tokens={max_prompt_tokens}",
+                flush=True,
+            )
 
 if __name__ == "__main__":
      main()

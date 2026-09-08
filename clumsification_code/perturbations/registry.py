@@ -11,13 +11,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .schemas import PerturbationMethod
-from .llm_zero_shot import ZeroShotLLMMethod
-from .llm_sampled import SampledLLMMethod
+from .llm_sampled import SampledLLMMethod, SingleLLMMethod
 from .traditional import (
-    TraditionalMultiMethod,
+    TraditionalSampledMethod,
     TraditionalSingleMethod,
-    UniEvalMethod,
-    UniEvalTraditionalMethod,
 )
 
 
@@ -52,35 +49,25 @@ class MethodSpec:
 
 
 _METHODS: dict[str, MethodSpec] = {
-    "llm_zero_shot": MethodSpec(
-        "llm_zero_shot", "LLM", "Fixed-prompt LLM perturbation.",
-        factory=lambda config: ZeroShotLLMMethod(config),
+    "llm_single": MethodSpec(
+        "llm_single", "LLM", "LLM perturbation with one sampled edit operation.",
+        factory=lambda config: SingleLLMMethod(config),
     ),
     "llm_sampled": MethodSpec(
         "llm_sampled", "LLM", "LLM perturbation with sampled edit operations.",
         factory=lambda config: SampledLLMMethod(config),
     ),
-    "unieval": MethodSpec(
-        "unieval", "trad", "UniEval insert/delete/shuffle perturbation.",
-        factory=lambda config: UniEvalMethod(config),
-    ),
     "trad_single": MethodSpec(
         "trad_single", "trad", "One sampled traditional fluency edit.",
         factory=lambda config: TraditionalSingleMethod(config),
     ),
-    "trad_multi": MethodSpec(
-        "trad_multi", "trad", "Multiple sampled traditional fluency edits.",
-        factory=lambda config: TraditionalMultiMethod(config),
-    ),
-    "unieval_trad": MethodSpec(
-        "unieval_trad",
-        "trad",
-        "UniEval perturbation followed by traditional, complementary fluency edits like breaking S-V agreement.",
-        factory=lambda config: UniEvalTraditionalMethod(config),
+    "trad_sampled": MethodSpec(
+        "trad_sampled", "trad", "Length-scaled sampled traditional fluency edits.",
+        factory=lambda config: TraditionalSampledMethod(config),
     ),
 }
 
-_DEPRECATED_ALIASES = {"unieval_summinflect": "unieval_trad"}
+_DEPRECATED_ALIASES: dict[str, str] = {}
 
 
 def list_method_specs(*, implemented_only: bool = False) -> tuple[MethodSpec, ...]:

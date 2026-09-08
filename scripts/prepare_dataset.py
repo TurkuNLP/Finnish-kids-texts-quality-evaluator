@@ -18,12 +18,12 @@ from clumsification_code.perturbations import generate_layer, get_method_spec
 
 def preset_config(name: str, dataset: str) -> dict[str, Any]:
     presets = {
-        "zero_shot_ablation": {
+        "single_llm_ablation": {
             "dataset": dataset,
-            "generations": [{"method": "llm_zero_shot", "source_layer": 0}],
+            "generations": [{"method": "llm_single", "source_layer": 0}],
             "hf": {
-                "output_name": f"{dataset}_zero_shot", "include_layers": [1],
-                "include_methods": ["llm_zero_shot"],
+                "output_name": f"{dataset}_single_llm", "include_layers": [1],
+                "include_methods": ["llm_single"],
             },
         },
         "sampled_llm_ablation": {
@@ -38,13 +38,11 @@ def preset_config(name: str, dataset: str) -> dict[str, Any]:
             "dataset": dataset,
             "generations": [
                 {"method": method, "source_layer": 0}
-                for method in ("unieval", "unieval_trad", "trad_single", "trad_multi")
+                for method in ("trad_single", "trad_sampled")
             ],
             "hf": {
                 "output_name": f"{dataset}_traditional", "include_layers": [1],
-                "include_methods": [
-                    "unieval", "unieval_trad", "trad_single", "trad_multi"
-                ],
+                "include_methods": ["trad_single", "trad_sampled"],
             },
         },
     }
@@ -127,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     source.add_argument("--config")
     source.add_argument(
         "--preset",
-        choices=["zero_shot_ablation", "sampled_llm_ablation", "traditional_comparison"],
+        choices=["single_llm_ablation", "sampled_llm_ablation", "traditional_comparison"],
     )
     parser.add_argument("--dataset")
     parser.add_argument("--output-root", default="data/hf_datasets")

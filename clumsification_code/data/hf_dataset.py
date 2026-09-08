@@ -407,7 +407,7 @@ def create_formatted_dataset_dict(
     if include_layers is None and max_layers is not None:
         include_layers = list(range(1, max_layers + 1))
     if methods is None and layer_type == "trad":
-        methods = ["unieval", "unieval_trad", "trad_single", "trad_multi"]
+        methods = ["trad_single", "trad_sampled"]
     if random_pairs:
         pair_policy = "cross_source_unmatched"
     repositories = {

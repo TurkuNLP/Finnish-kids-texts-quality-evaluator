@@ -10,6 +10,7 @@ from typing import Iterable, Mapping, Sequence
 
 
 SEVERITIES = ("weak", "medium", "strong")
+ABSOLUTE_MAX_EDIT_COUNT = 5
 _REQUIRED_FIELDS = {
     "edit_id",
     "target_dimensions",
@@ -119,16 +120,16 @@ def sample_edit_count(
 ) -> int:
     """Sample a length-scaled edit count from a truncated normal distribution.
 
-    The range is one through ``floor(text_length / 500)``. Short texts
-    therefore still receive one edit. ``max_edits`` caps the draw when a
-    catalog cannot provide more distinct compatible operations.
+    The range is one through ``min(5, floor(text_length / 500))``. Short
+    texts therefore still receive one edit. ``max_edits`` can impose a lower
+    caller-specific cap when a method cannot realize the full shared range.
     """
     if text_length < 0:
         raise ValueError("text_length must be non-negative")
     if max_edits is not None and max_edits < 1:
         raise ValueError("max_edits must be at least 1 when provided")
 
-    upper = max(1, text_length // 500)
+    upper = min(ABSOLUTE_MAX_EDIT_COUNT, max(1, text_length // 500))
     if max_edits is not None:
         upper = min(upper, max_edits)
     if upper == 1:
@@ -306,6 +307,7 @@ def sample_edit_assignment(
 
 
 __all__ = [
+    "ABSOLUTE_MAX_EDIT_COUNT",
     "SEVERITIES",
     "EditCatalogEntry",
     "SampledEditAssignment",

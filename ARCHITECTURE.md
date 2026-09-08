@@ -19,6 +19,24 @@ The canonical candidate graph is the boundary shared by generation, scoring,
 and dataset construction. No stage reconstructs identity from filenames or
 text equality.
 
+## Fixed English source corpus
+
+The primary English source corpus is
+`nemotron-cc-high-propella-custom-eng`. It is distinct from the human-labeled
+English evaluation suite. Its 84,554 documents were produced from a 557,017-row
+every-tenth-document sample of an approximately 5.5-million-document,
+21-crawl `nemotron-cc-high-actual` collection. Before sampling, documents had
+to be 200--20,000 characters and satisfy Propella
+`content_ratio=complete_content`, `content_integrity=complete`, and
+`content_quality in {excellent, high}` filters. A custom genre-aware vLLM
+quality filter then retained only valid PASS assessments with a substantial
+high-quality section.
+
+The corpus has immutable source-level partitions: 15,000 `dev`, 15,000 `test`,
+and 54,554 `train_01` documents. Assignment uses seed 42 and document
+character-length deciles. The import and partition manifests retain input/output
+hashes, outcome counts, and hashes of the source IDs assigned to each partition.
+
 ## Canonical repository
 
 For each custom dataset:
@@ -57,8 +75,10 @@ disagreement, and content-hash mismatches.
 generation service. `scripts/generate_perturbations.py` is the single-layer
 client; `scripts/prepare_dataset.py` can execute several declared generations.
 
-Canonical method names are `llm_zero_shot`, `llm_sampled`, `unieval`,
-`trad_single`, `trad_multi`, and `unieval_trad`. LLM implementations share a
+Canonical LLM method names are `llm_single`, `llm_sampled`; the only active
+traditional names are `trad_single` and `trad_sampled`. Both sample from the
+same five-operation mix: UniEval-style repetition, deletion, and shuffle;
+agreement corruption; and random same-lemma morphology. LLM implementations share a
 runner boundary and load vLLM only when needed. The sampled method uses a
 versioned JSONL edit catalog and deterministically samples, for each
 candidate, the edit count, target dimensions, operations, and severity from
@@ -156,15 +176,15 @@ sbatch updated_sbatch_jobs/train_fe_pairwise_full.sh \
 
 ### Staged one-method pilot
 
-For the decision of whether to commission larger LLM perturbation runs,
-`updated_sbatch_jobs/train_fe_pairwise_pilot.sh` trains on a fixed 50k-source
-block from one perturbation method. Its source-level partitions keep a 10k dev
-set and a separate 10k test set constant across the 50k, 100k, and later
-training subsets. With one original and one selected perturbation per source,
-the job executes 390 updates (49,920 pairs) and saves five checkpoints at
-9,984-pair intervals. It uses FlashAttention 2, 32 train pairs/GPU, and 48
-evaluation pairs/GPU. Validation begins after 20k pairs and stopping requires
-three saved checkpoints without at least a 0.003 pairwise-accuracy gain.
+For one-method pilots, `updated_sbatch_jobs/train_fe_pairwise_pilot.sh` trains
+on the fixed `train_01` source partition. In the current English corpus this
+is 54,554 sources, alongside separate 15,000-source `dev` and `test`
+source-text partitions. With one original and one selected perturbation per
+source, the job executes 390 updates (49,920 pairs)
+and saves five checkpoints at 9,984-pair intervals. It uses FlashAttention 2,
+32 train pairs/GPU, and 48 evaluation pairs/GPU. Validation begins after 20k
+pairs and stopping requires three saved checkpoints without at least a 0.003
+pairwise-accuracy gain.
 
 ```bash
 sbatch updated_sbatch_jobs/train_fe_pairwise_pilot.sh \

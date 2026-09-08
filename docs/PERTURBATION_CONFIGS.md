@@ -19,6 +19,57 @@ data/custom_datasets/<dataset>/
     <scoring_method>/<scoring_run_id>.metadata.json
 ```
 
+### Import the English corpus after vLLM filtering
+
+The fixed English source corpus is
+`nemotron-cc-high-propella-custom-eng`. Its provenance is:
+
+1. `nemotron-cc-high-actual` was filtered across 21 source crawls to roughly
+   5.5 million documents. A document was retained only when it had 200--20,000
+   characters and passed the Propella conditions `content_ratio=complete_content`,
+   `content_integrity=complete`, and `content_quality` equal to `excellent` or
+   `high`.
+2. Every tenth retained document was sampled, yielding exactly **557,017**
+   source rows in `nemotron-cc-high-propella-eng`.
+3. The custom vLLM filter was run over all 557,017 rows. It evaluates each
+   document relative to its genre and rejects incoherent, boilerplate-heavy,
+   spammy, templated, code-like, list-dominated, metadata-dominated, or
+   otherwise low-quality text. It permits minor defects and short-form genres
+   only when there is a substantial excellent section. The raw assessment is
+   stored in `passes_filters`.
+4. Only a valid assessment with `decision="PASS"` and
+   `contains_substantial_high_quality_section=true` was retained. This yielded
+   exactly **84,554** documents: 451,780 explicit FAIL rows, 20,679 malformed
+   assessments, and 4 internally inconsistent assessments were excluded.
+5. A seeded, source-level character-length-decile partition produced 15,000
+   `dev` sources, 15,000 `test` sources, and 54,554 `train_01` sources.
+
+The mass filter writes one output row for every input row and stores its JSON
+assessment in `passes_filters`. The importer reconstructs the pass-only
+canonical corpus from that output:
+
+```bash
+# Validate the full input and preview the accepted/rejected counts.
+python scripts/import_filtered_custom_dataset.py \
+  --input /path/to/completed-filter-output.jsonl \
+  --dataset nemotron-cc-high-propella-custom-eng \
+  --dry-run
+
+# Write original.jsonl and filter_import_manifest.json atomically.
+python scripts/import_filtered_custom_dataset.py \
+  --input /path/to/completed-filter-output.jsonl \
+  --dataset nemotron-cc-high-propella-custom-eng \
+  --overwrite
+```
+
+The importer fails closed: null, malformed, FAIL, or internally inconsistent
+assessments are excluded. Passing rows retain their original metadata plus the
+parsed filter assessment and input line number under `filter_provenance`. The
+manifest records the input/output paths and SHA-256 checksums, the exact
+acceptance rule, and counts for every outcome. Duplicate passing source IDs,
+invalid texts, and existing derived perturbation/score/partition artifacts are
+hard errors.
+
 An original row requires `custom_id` and `text`. String and integer source IDs
 are accepted and normalized to strings. The source ID identifies a document;
 `candidate_id` identifies one exact original or perturbation candidate.
@@ -32,35 +83,35 @@ an original or any existing layer, including one produced by another method.
 
 For a large custom dataset, assign source-level partitions once before
 generation. This preserves train/dev/test isolation across every perturbation
-method and makes 50k, 100k, and larger training subsets nested rather than
-independently resampled:
+method. The fixed English corpus uses 15,000 sources for each held-out
+source-text partition and all 54,554 remaining sources for training:
 
 ```bash
 # Preview only; this does not change original.jsonl.
 python -m scripts.assign_dataset_partitions \
-  --dataset nemotron-cc-high-propella-eng \
-  --dev-size 10000 --test-size 10000 --train-block-size 50000 \
+  --dataset nemotron-cc-high-propella-custom-eng \
+  --dev-size 15000 --test-size 15000 --train-block-size 54554 \
   --seed 42 --dry-run
 
 # Apply the reviewed plan atomically.
 python -m scripts.assign_dataset_partitions \
-  --dataset nemotron-cc-high-propella-eng \
-  --dev-size 10000 --test-size 10000 --train-block-size 50000 \
+  --dataset nemotron-cc-high-propella-custom-eng \
+  --dev-size 15000 --test-size 15000 --train-block-size 54554 \
   --seed 42
 ```
 
 The command adds `partition` to each original record and writes
-`partition_manifest.json`. The standard high-propella plan has `dev` and
-`test` partitions of 10k sources each, ten `train_01`–`train_10` blocks of
-50k sources, and `train_remainder`. Assignment is deterministic and
-stratified by source-document character-length decile.
+`partition_manifest.json`. The completed English-corpus manifest records the
+seed (`42`), character-length-decile stratification, input and output hashes,
+and the exact `dev=15,000`, `test=15,000`, `train_01=54,554` assignments.
 
-Generate expensive perturbations only for the needed pilot scope:
+Generate a partition-selected LLM layer by supplying the model explicitly:
 
 ```bash
 python -m scripts.generate_perturbations \
-  --dataset nemotron-cc-high-propella-eng \
+  --dataset nemotron-cc-high-propella-custom-eng \
   --source-layer 0 --method llm_sampled --run-id sampled-pilot-v1 \
+  --model-path Qwen/Qwen3.5-27B \
   --source-partitions dev test train_01
 ```
 
@@ -70,53 +121,86 @@ always resolved through the canonical original source.
 
 ## Generate one layer
 
-Use `scripts/generate_perturbations.py` for a single generation:
+Run one method per layer with `scripts/generate_perturbations.py`. The command
+records the full effective configuration, deterministic seed, source selection,
+candidate ancestry, method-specific edit evidence, and output-file checksum in
+the perturbation manifest.
+
+### Canonical methods
+
+The only generative methods are:
+
+| Method | Number of edits | Generation procedure |
+| --- | --- | --- |
+| `llm_single` | Exactly 1 | Sample one catalog operation, one target dimension, and one severity, then ask the LLM to apply it. |
+| `llm_sampled` | 1--5 | Sample a length-conditioned number of catalog operations, dimensions, and severity, then ask the LLM to apply them. |
+| `trad_single` | Exactly 1 | Sample one applicable operation from the five-operation traditional mix. |
+| `trad_sampled` | 1--5 | Sample a length-conditioned number of traditional edits. |
+
+For both sampled methods, the requested edit count is sampled uniformly from
+`1..min(5, floor(character_length / 500))`. A text shorter than 500 characters
+therefore receives one edit. This count is deterministic for a source candidate
+and seed.
+
+Run the two LLM workflows from originals as follows. `--model-path` identifies
+the local or Hugging Face model served by the LLM runner.
 
 ```bash
+# One LLM edit per original source.
+python scripts/generate_perturbations.py \
+  --dataset my_dataset \
+  --source-layer 0 \
+  --method llm_single \
+  --run-id llm-single-v1 \
+  --target-layer 1 \
+  --model-path Qwen/Qwen3.5-27B
+
+# One to five LLM edits per original source, conditional on text length.
 python scripts/generate_perturbations.py \
   --dataset my_dataset \
   --source-layer 0 \
   --method llm_sampled \
-  --run-id sampled-dynamic-v1 \
+  --run-id llm-sampled-v1 \
   --target-layer 1 \
   --model-path Qwen/Qwen3.5-27B
 ```
 
-To perturb an existing layer, identify its method and run:
+Run the two traditional workflows from originals as follows. `--language en`
+uses Lemminflect; other supported languages use UniMorph.
+
+```bash
+# Exactly one traditional edit per original source.
+python scripts/generate_perturbations.py \
+  --dataset my_dataset \
+  --source-layer 0 \
+  --method trad_single \
+  --run-id trad-single-v1 \
+  --target-layer 1 \
+  --language en
+
+# One to five traditional edits per original source, conditional on text length.
+python scripts/generate_perturbations.py \
+  --dataset my_dataset \
+  --source-layer 0 \
+  --method trad_sampled \
+  --run-id trad-sampled-v1 \
+  --target-layer 1 \
+  --language en
+```
+
+To generate from an existing perturbation layer, provide the exact source
+method and run ID. For example:
 
 ```bash
 python scripts/generate_perturbations.py \
   --dataset my_dataset \
   --source-layer 1 \
   --source-method llm_sampled \
-  --source-run-id sampled-dynamic-v1 \
-  --method trad_multi \
-  --run-id trad-after-llm-v1 \
+  --source-run-id llm-sampled-v1 \
+  --method trad_sampled \
+  --run-id trad-sampled-after-llm-v1 \
   --target-layer 2 \
-  --language en \
-  --n-edits 3
-```
-
-### CSC batch-job examples
-
-The wrappers in `updated_sbatch_jobs/` use the same canonical commands. For a
-sampled-LLM pilot, submit the dedicated wrapper with environment variables:
-
-```bash
-DATASET=my_dataset RUN_ID=sampled-dynamic-v1 LIMIT=1000 \
-  sbatch updated_sbatch_jobs/pert_job.sh
-```
-
-`pert_job.sh` deliberately does not expose fixed edit-count, target-dimension,
-or severity settings: `llm_sampled` samples all three per source text. Set
-`MAX_MODEL_LEN` only to change the LLM context ceiling; set `MAX_RETRIES` only
-when intentionally changing the default three retries. The generic wrapper is
-equivalent when explicit command-line arguments are preferable:
-
-```bash
-sbatch updated_sbatch_jobs/generate_perturbations.sh \
-  --dataset my_dataset --source-layer 0 --method llm_sampled \
-  --run-id sampled-dynamic-v1 --model-path Qwen/Qwen3.5-27B
+  --language en
 ```
 
 `target_layer` defaults to `source_layer + 1`. A perturbed source requires
@@ -144,25 +228,8 @@ retry records its effective seed, attempted and recovered counts, and any
 remaining failures in that layer's manifest. `--retry-failed` cannot be used
 with `--overwrite`.
 
-For the sampled-LLM wrapper, use the same environment values with
-`RETRY_FAILED=1`; for example, `DATASET=my_dataset RUN_ID=sampled-dynamic-v1
-RETRY_FAILED=1 sbatch updated_sbatch_jobs/pert_job.sh`.
-
-### Available methods
-
-| Method | Meaning |
-| --- | --- |
-| `llm_zero_shot` | Fixed-prompt LLM perturbation retained for the ablation. |
-| `llm_sampled` | Samples edit types, fluency dimensions, and severity for the LLM prompt. |
-| `unieval` | UniEval-style insertion, deletion, and shuffle noise. |
-| `trad_single` | One applicable traditional perturbation. |
-| `trad_multi` | Multiple applicable traditional perturbations. |
-| `unieval_trad` | UniEval noise followed by traditional edits. |
-
-The traditional implementation is multilingual. English inflection uses
-Lemminflect; other supported languages use UniMorph. Language-specific
-operations are excluded where they are not applicable. The former
-`unieval_summinflect` variant is represented by `unieval_trad`.
+`llm_zero_shot` and the previous traditional pathways are archived historical
+ablations, not valid generation methods.
 
 ### Sampled LLM options
 
@@ -180,14 +247,12 @@ operations are excluded where they are not applicable. The former
 }
 ```
 
-For `llm_sampled`, the edit count is sampled deterministically from each
-source text's character length; it is not a configuration option. Target
+For `llm_sampled`, the edit count is not a configuration option. Target
 dimensions are sampled uniformly from the dimensions in the edit catalog. The
 number selected is sampled uniformly from one through the smaller of the edit
 count and the number of catalog dimensions. Severity is sampled uniformly and
 deterministically from `weak`, `medium`, and `strong`; it is not a
-configuration option. vLLM and model dependencies load only when an LLM method
-is executed. When a selected dimension has fewer catalog operations than the
+configuration option. When a selected dimension has fewer catalog operations than the
 sampled edit count, operations may repeat so that the requested count is
 preserved.
 Each sampling decision uses its own deterministic seed derived from the
@@ -210,20 +275,35 @@ it is not the number of target dimensions or a severity level. For
 for traditional methods, it is the number of operations that actually made a
 change. Historical rows without this field remain readable as `null`.
 
-### Traditional options
+### Traditional sampling and verification
 
-```json
-{
-  "language": "en",
-  "n_noise": 1,
-  "n_edits": 3,
-  "operations": ["jumble", "subject_verb_dis", "typos"],
-  "seed": 42
-}
-```
+`trad_single` always realizes one edit. `trad_sampled` uses the same
+per-text length rule as `llm_sampled`: it samples uniformly from one through
+`min(5, floor(character_length / 500))`. For every requested edit position,
+the five operations begin equally likely. An operation that cannot make a
+substantive change is removed from that position's pool and another remaining
+operation is drawn uniformly. After a successful edit, the full five-operation
+pool is restored, so later positions sample with replacement.
 
-`operation` selects the operation for `trad_single`. `operations` restricts
-the pool for `trad_multi` and `unieval_trad`.
+The only traditional configuration normally needed is `language` (plus the
+global deterministic `seed`). Fixed edit counts and operation-restriction
+flags are intentionally not exposed.
+
+The five operations are equally likely at the start of every requested edit:
+
+1. UniEval-style token-span repetition/insertion.
+2. UniEval-style token-span deletion.
+3. UniEval-style token-span shuffle.
+4. Same-lemma finite-verb agreement corruption.
+5. Same-lemma random morphology alteration, including a possible POS change.
+
+Repetition and deletion always select at least one token; shuffle selects at
+least two and must alter their order. Deletion that would empty a text is
+inapplicable. Morphology edits require evidence that the replacement has the
+same lemma but different recorded features. If an operation is inapplicable,
+it is removed only from the current edit's sampling pool and another remaining
+operation is sampled. A successful edit restores all five operations for the
+next requested edit, so sampled edits are drawn with replacement.
 
 ## Score canonical candidates
 
@@ -234,8 +314,8 @@ python scripts/score_custom_dataset.py \
   --dataset-name my_dataset \
   --scoring-type bertscore_f1 \
   --scoring-run-id bertscore-v1 \
-  --methods llm_sampled trad_multi \
-  --perturbation-run-ids sampled-dynamic-v1 trad-after-llm-v1 \
+  --methods llm_sampled trad_sampled \
+  --perturbation-run-ids sampled-dynamic-v1 trad-sampled-after-llm-v1 \
   --target-layers 1 2 \
   --reference-policy parent
 ```
@@ -286,8 +366,8 @@ object such as `configs/hf_build.example.json`.
 python scripts/build_hf_dataset.py \
   --datasets my_dataset \
   --output-name my_dataset_hf \
-  --include-methods llm_sampled trad_multi \
-  --include-runs sampled-dynamic-v1 trad-after-llm-v1 \
+  --include-methods llm_sampled trad_sampled \
+  --include-runs sampled-dynamic-v1 trad-sampled-after-llm-v1 \
   --include-layers 1 2 \
   --composition balanced \
   --pair-policy parent_child \
@@ -300,9 +380,9 @@ included automatically and `train_01` is selected explicitly:
 
 ```bash
 python -m scripts.build_hf_dataset \
-  --datasets nemotron-cc-high-propella-eng \
-  --output-name en/unieval_pilot_50k \
-  --include-methods unieval --include-runs unieval-v1 --include-layers 1 \
+  --datasets nemotron-cc-high-propella-custom-eng \
+  --output-name en/trad_single_pilot_50k \
+  --include-methods trad_single --include-runs trad-single-v1 --include-layers 1 \
   --train-partitions 1
 ```
 
@@ -390,7 +470,7 @@ Generation options belong inside each entry's `config` object:
 
 Within a workflow, `hf.datasets` defaults to the top-level dataset and
 `hf.seed` defaults to the workflow seed. Presets are available for
-`zero_shot_ablation`, `sampled_llm_ablation`, and `traditional_comparison`.
+`single_llm_ablation`, `sampled_llm_ablation`, and `traditional_comparison`.
 
 ## Legacy import
 
@@ -400,7 +480,7 @@ Historical folders are accepted only through explicit migration:
 python scripts/import_legacy_dataset.py \
   --dataset my_dataset \
   --source-directory perturbed_layers \
-  --method llm_zero_shot \
+  --method llm_single \
   --run-id legacy-import
 ```
 

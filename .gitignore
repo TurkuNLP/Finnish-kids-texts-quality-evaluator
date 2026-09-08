@@ -6,6 +6,7 @@ __pycache__/
 # Local living research plan and agent memory
 PROJECT_VISION.local.md
 *.tar.gz
+docs/ENGLISH_EVAL_SPLITS_AND_DEV_DATA.md
 
 # Datasets and generated data stay local. Prompt definitions are source assets
 # for the paper methodology and are the only tracked data exceptions.

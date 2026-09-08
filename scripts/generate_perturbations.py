@@ -55,11 +55,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--method-config", default=None)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--n-noise", type=int, default=None)
-    parser.add_argument("--n-edits", type=int, default=None)
     parser.add_argument("--n-jobs", type=int, default=None)
-    parser.add_argument("--operation", default=None)
-    parser.add_argument("--operations", nargs="+", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--source-partitions",
@@ -73,12 +69,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Additional per-entry retries for invalid LLM outputs (default: 3).",
-    )
-    parser.add_argument(
-        "--max-attempts",
-        type=int,
-        default=None,
-        help="Per-entry attempts for traditional perturbations (default: 100).",
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
@@ -110,14 +100,9 @@ def main() -> None:
                 "model": args.model_path,
                 "max_model_len": args.max_model_len,
                 "seed": args.seed,
-                "n_noise": args.n_noise,
-                "n_edits": args.n_edits,
                 "n_jobs": args.n_jobs,
-                "operation": args.operation,
-                "operations": args.operations,
                 "allow_unchanged": args.allow_unchanged,
                 "max_retries": args.max_retries,
-                "max_attempts": args.max_attempts,
             }.items()
             if value is not None
         }

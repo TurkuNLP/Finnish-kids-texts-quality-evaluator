@@ -6,13 +6,18 @@ quality evaluators, and evaluating them.
 
 The perturbation workflow supports:
 
-- zero-shot and sampled-operation LLM perturbations;
-- UniEval-style and multilingual traditional perturbations;
+- single-edit and sampled-edit LLM perturbations;
+- canonical multilingual traditional perturbations;
 - generation from an original or any canonical perturbation layer;
 - method- and run-separated outputs with exact candidate ancestry;
 - automatic scalar supervision attached to exact candidate identities,
   including G-Eval and Themis/MENLO fluency judgments;
 - leakage-safe Hugging Face datasets with configurable mixtures and pairs.
+
+The fixed English source corpus, `nemotron-cc-high-propella-custom-eng`, has
+84,554 custom-vLLM-filtered documents partitioned source-wise into 15,000 dev,
+15,000 test, and 54,554 training documents. Its full filtering and partition
+provenance is documented in the perturbation workflow guide.
 
 ## Canonical commands
 
@@ -21,7 +26,8 @@ Generate one perturbation layer:
 ```bash
 python scripts/generate_perturbations.py \
   --dataset <dataset> --source-layer 0 \
-  --method llm_sampled --run-id sampled-dynamic-v1
+  --method llm_sampled --run-id sampled-dynamic-v1 \
+  --model-path Qwen/Qwen3.5-27B
 ```
 
 Build a Hugging Face dataset:
@@ -29,7 +35,7 @@ Build a Hugging Face dataset:
 ```bash
 python scripts/build_hf_dataset.py \
   --datasets <dataset> --output-name <name> \
-  --include-methods llm_sampled trad_multi \
+  --include-methods llm_sampled trad_sampled \
   --include-layers 1 2
 ```
 

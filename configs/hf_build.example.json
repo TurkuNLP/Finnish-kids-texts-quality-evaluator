@@ -5,7 +5,7 @@
   ],
   "include_methods": [
     "llm_sampled",
-    "trad_multi"
+    "trad_sampled"
   ],
   "include_runs": [
     "sampled-dynamic-v1",

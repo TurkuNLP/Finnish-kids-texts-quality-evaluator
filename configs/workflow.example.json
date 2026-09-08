@@ -12,7 +12,7 @@
       "config": {}
     },
     {
-      "method": "trad_multi",
+      "method": "trad_sampled",
       "run_id": "trad-v1",
       "source_layer": 1,
       "source_method": "llm_sampled",
@@ -27,7 +27,7 @@
     "output_name": "example_mixed_hf",
     "include_methods": [
       "llm_sampled",
-      "trad_multi"
+      "trad_sampled"
     ],
     "include_runs": [
       "sampled-dynamic-v1",

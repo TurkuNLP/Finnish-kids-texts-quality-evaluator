@@ -24,7 +24,9 @@ from .schemas import GenerationRuntime, PerturbationInput, PerturbationResult
 
 
 SAMPLED_METHOD = "llm_sampled"
+SINGLE_METHOD = "llm_single"
 PROMPT_VERSION = "llm-sampled-v1"
+SINGLE_PROMPT_VERSION = "llm-single-v1"
 
 _SYSTEM_PROMPT = """You are a controlled fluency-perturbation editor. Rewrite the source so it is substantially less fluent while preserving its propositional content. Fluency concerns grammaticality, coherence, clarity, and naturalness. Preserve every claim, entity, number, polarity, temporal relation, causal relation, degree of certainty, and speaker attitude. Preserve existing source errors unless a requested operation directly targets that span. Return only the edited text."""
 
@@ -113,6 +115,7 @@ class SampledLLMMethod:
 
     name = SAMPLED_METHOD
     perturbation_source = "LLM"
+    prompt_version = PROMPT_VERSION
 
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = dict(config or {})
@@ -162,6 +165,7 @@ class SampledLLMMethod:
             SampledPromptRequest(
                 messages=render_sampled_messages(item, assignment_for_item := self.assignment_for_item(item, index=index)),
                 assignment=assignment_for_item,
+                prompt_version=self.prompt_version,
             )
             for index, item in enumerate(items)
         ]
@@ -214,9 +218,40 @@ class SampledLLMMethod:
         ]
 
 
+class SingleLLMMethod(SampledLLMMethod):
+    """One-operation counterpart to the length-scaled ``llm_sampled`` method."""
+
+    name = SINGLE_METHOD
+    prompt_version = SINGLE_PROMPT_VERSION
+
+    def assignment_for_item(
+        self, item: Mapping[str, Any], *, index: int = 0
+    ) -> SampledEditAssignment:
+        seed = _stable_item_seed(self.seed, item, index)
+        target_dimensions = sample_target_dimensions(
+            self.catalog,
+            n_dimensions=1,
+            seed=_stable_stream_seed(seed, "target_dimensions"),
+        )
+        return sample_edit_assignment(
+            self.catalog,
+            target_dimensions=target_dimensions,
+            n_edits=1,
+            severity=sample_severity(
+                SEVERITIES, seed=_stable_stream_seed(seed, "severity")
+            ),
+            seed=_stable_stream_seed(seed, "edit_operations"),
+            weights=self.weights,
+            require_dimension_coverage=True,
+        )
+
+
 __all__ = [
     "PROMPT_VERSION",
+    "SINGLE_METHOD",
+    "SINGLE_PROMPT_VERSION",
     "SAMPLED_METHOD",
+    "SingleLLMMethod",
     "SampledLLMMethod",
     "SampledPromptRequest",
     "render_sampled_messages",

@@ -20,48 +20,96 @@ UNIEVAL_SOURCE = (
     f"{UNIEVAL_COMMIT}/pseudo_data_summ.py#L19-L57"
 )
 
+UNIEVAL_OPERATIONS = ("repetition", "deletion", "shuffle")
 
-def apply_unieval_disfluency(
+
+class UniEvalOperationUnavailable(RuntimeError):
+    """A requested UniEval operation cannot make a substantive token edit."""
+
+
+def _span_length(
+    token_count: int,
+    *,
+    operation: str,
+    numpy_rng: np.random.Generator,
+) -> int:
+    """Use UniEval's Poisson span draw, subject to substantive-edit minima."""
+    minimum = 2 if operation == "shuffle" else 1
+    if token_count < minimum:
+        raise UniEvalOperationUnavailable(
+            f"{operation} requires at least {minimum} tokens; found {token_count}"
+        )
+    return min(token_count, max(minimum, int(numpy_rng.poisson(5))))
+
+
+def apply_unieval_operation(
     text: str,
     *,
-    n_noise: int = 1,
+    operation: str,
     python_rng: random.Random | Any | None = None,
     numpy_rng: np.random.Generator | None = None,
-) -> tuple[str, list[dict]]:
-    """Apply UniEval's insert/delete/shuffle loop to whitespace tokens."""
-    if n_noise < 1:
-        raise ValueError("n_noise must be at least 1")
+    max_shuffle_attempts: int = 10,
+) -> tuple[str, dict]:
+    """Apply one explicit UniEval corruption with a substantive token change.
+
+    Span lengths, positions, copied-span selection, and token shuffling retain
+    UniEval's original mechanics. The only deliberate deviations are minimum
+    spans of one token for repetition/deletion, two for shuffle, and resampling
+    an unchanged shuffle permutation.
+    """
+    if operation not in UNIEVAL_OPERATIONS:
+        raise ValueError(
+            f"Unknown UniEval operation {operation!r}; choose one of {UNIEVAL_OPERATIONS}"
+        )
+    if max_shuffle_attempts < 1:
+        raise ValueError("max_shuffle_attempts must be at least 1")
+
     py_rng = python_rng or random
     np_rng = numpy_rng or np.random.default_rng()
     tokens = text.split()
-    edits: list[dict] = []
-    for _ in range(n_noise):
-        target_len = len(tokens)
-        if target_len == 0:
-            break
-        span_len = min(target_len, int(np_rng.poisson(5)))
-        transform_type = py_rng.randint(1, 3)
-        start_idx = py_rng.randint(0, target_len - span_len)
-        edit = {
-            "transform_type": {1: "insert", 2: "delete", 3: "shuffle"}[
-                transform_type
-            ],
-            "span_len": span_len,
-            "start_idx": start_idx,
-        }
-        if transform_type == 1:
-            copy_idx = py_rng.randint(0, target_len - span_len)
-            edit["copy_idx"] = copy_idx
-            tokens = (
-                tokens[:start_idx]
-                + tokens[copy_idx : copy_idx + span_len]
-                + tokens[start_idx:]
+    if not tokens:
+        raise UniEvalOperationUnavailable("Cannot corrupt an empty token sequence")
+    target_len = len(tokens)
+    span_len = _span_length(target_len, operation=operation, numpy_rng=np_rng)
+    start_idx = py_rng.randint(0, target_len - span_len)
+    edit = {
+        "transform_type": operation,
+        "span_len": span_len,
+        "start_idx": start_idx,
+    }
+
+    if operation == "repetition":
+        copy_idx = py_rng.randint(0, target_len - span_len)
+        edit["copy_idx"] = copy_idx
+        result = (
+            tokens[:start_idx]
+            + tokens[copy_idx : copy_idx + span_len]
+            + tokens[start_idx:]
+        )
+    elif operation == "deletion":
+        result = tokens[:start_idx] + tokens[start_idx + span_len :]
+        if not result:
+            raise UniEvalOperationUnavailable(
+                "Deletion would remove the entire token sequence"
             )
-        elif transform_type == 2:
-            tokens = tokens[:start_idx] + tokens[start_idx + span_len :]
-        else:
-            shuffled_span = tokens[start_idx : start_idx + span_len]
+    else:
+        original_span = tokens[start_idx : start_idx + span_len]
+        result = None
+        for shuffle_attempt in range(max_shuffle_attempts):
+            shuffled_span = list(original_span)
             py_rng.shuffle(shuffled_span)
-            tokens = tokens[:start_idx] + shuffled_span + tokens[start_idx + span_len :]
-        edits.append(edit)
-    return " ".join(tokens), edits
+            if shuffled_span != original_span:
+                result = tokens[:start_idx] + shuffled_span + tokens[start_idx + span_len :]
+                edit["shuffle_attempts"] = shuffle_attempt + 1
+                break
+        if result is None:
+            raise UniEvalOperationUnavailable(
+                "Shuffle could not change the selected token span"
+            )
+
+    output = " ".join(result)
+    if output == " ".join(tokens):
+        raise UniEvalOperationUnavailable(
+            f"{operation} did not change the token sequence"
+        )
+    return output, edit

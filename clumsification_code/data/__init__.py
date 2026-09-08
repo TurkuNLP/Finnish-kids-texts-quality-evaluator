@@ -12,7 +12,13 @@ from .schemas import (
     WorkflowConfig,
 )
 from .repository import DatasetRepository
-from .hf_dataset import build_hf_dataset
+
+
+def build_hf_dataset(*args, **kwargs):
+    """Load the optional Arrow-backed builder only when it is invoked."""
+    from .hf_dataset import build_hf_dataset as _build_hf_dataset
+
+    return _build_hf_dataset(*args, **kwargs)
 
 __all__ = [
     "CandidateRecord",

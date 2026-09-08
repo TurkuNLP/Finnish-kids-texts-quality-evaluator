@@ -5,25 +5,18 @@ Multilingual rule-based perturbations backed by UniMorph.
 
 Available templates
 -------------------
-jumble
-    Swap two word tokens. When focus offsets are supplied, one swapped word
-    must overlap the focus. Lightweight heuristics avoid merely reordering two
-    members of the same comma-separated list.
-subject_verb_dis
+agreement_corruption
     Replace a finite verb with a conflicting form from the same lemma.
 random_inflection
-    Replace an inflectable word with another form of the same lemma and POS.
-typos
-    Introduce one Unicode-aware character-level typo.
+    Replace an inflectable word with a distinct same-lemma form. The form need
+    not retain the original part of speech.
 
 Optional item fields
 --------------------
 focus_start, focus_end:
     Character offsets relative to item["text"].
 focus_word_radius:
-    For non-jumble rules, the number of neighboring words that may be changed.
-    The MCQ builder supplies 1. Jumble always requires an overlapping focus
-    word, regardless of this radius.
+    The number of neighboring words that may be changed.
 
 Items without focus metadata retain the original unrestricted behavior.
 
@@ -532,6 +525,7 @@ class MultilingualRulePerturber:
         self.random_seed = random_seed
         self._analysis_cache: dict[str, tuple[MorphEntry, ...]] = {}
         self._paradigm_cache: dict[str, tuple[MorphEntry, ...]] = {}
+        self.last_edit_metadata: dict[str, Any] | None = None
 
     @staticmethod
     def _text(item: dict) -> str:
@@ -600,6 +594,34 @@ class MultilingualRulePerturber:
         self._paradigm_cache[lemma] = result
         return result
 
+    def _record_morphology_edit(
+        self,
+        *,
+        operation: str,
+        token_index: int,
+        span: WordSpan,
+        replacement: str,
+    ) -> None:
+        """Retain analysis evidence for the selected same-lemma replacement."""
+        source_analyses = self._analyze(span.text)
+        replacement_analyses = self._analyze(replacement)
+        self.last_edit_metadata = {
+            "token_index": token_index,
+            "character_start": span.start,
+            "character_end": span.end,
+            "source_form": span.text,
+            "replacement_form": replacement,
+            "operation": operation,
+            "source_analyses": [
+                {"lemma": entry.lemma, "features": entry.features}
+                for entry in source_analyses
+            ],
+            "replacement_analyses": [
+                {"lemma": entry.lemma, "features": entry.features}
+                for entry in replacement_analyses
+            ],
+        }
+
     @staticmethod
     def _form_differs(source: str, candidate: str) -> bool:
         return (
@@ -647,6 +669,8 @@ class MultilingualRulePerturber:
             if not self._form_differs(source, candidate.form):
                 continue
             candidate_atoms = _feature_atoms(candidate.features)
+            if self._has_compatible_analysis(candidate.form, analysis):
+                continue
             if _part_of_speech(candidate_atoms) != current_pos:
                 continue
             if not _is_finite_verb(candidate_atoms):
@@ -676,6 +700,17 @@ class MultilingualRulePerturber:
             )
             candidates.append(ScoredForm(score, candidate.form))
         return candidates
+
+    def _has_compatible_analysis(
+        self, form: str, source_analysis: MorphEntry
+    ) -> bool:
+        """Reject an ambiguous replacement that still realizes source features."""
+        source_atoms = _feature_atoms(source_analysis.features)
+        return any(
+            candidate.lemma == source_analysis.lemma
+            and _feature_atoms(candidate.features) == source_atoms
+            for candidate in self._analyze(form)
+        )
 
     def _danish_tense_mood_candidates(
         self, analysis: MorphEntry, source: str
@@ -745,9 +780,9 @@ class MultilingualRulePerturber:
             if not self._form_differs(source, candidate.form):
                 continue
             candidate_atoms = _feature_atoms(candidate.features)
-            if _part_of_speech(candidate_atoms) != current_pos:
-                continue
             if candidate_atoms == current_atoms:
+                continue
+            if self._has_compatible_analysis(candidate.form, analysis):
                 continue
 
             distance = len(current_atoms ^ candidate_atoms)
@@ -808,10 +843,12 @@ class MultilingualRulePerturber:
             ],
         )
 
-    def subject_verb_dis(self, item: dict) -> str:
+    def agreement_corruption(self, item: dict) -> str:
+        """Change finite-verb agreement features with a verified same-lemma form."""
+        self.last_edit_metadata = None
         text = self._text(item)
         spans = _word_spans(text)
-        rng = self._rng(item, "subject_verb_dis")
+        rng = self._rng(item, "agreement_corruption")
         eligible = _focused_word_indices(
             item, spans, radius=_focus_radius(item)
         )
@@ -821,24 +858,22 @@ class MultilingualRulePerturber:
             span = spans[index]
             scored: list[ScoredForm] = []
             for analysis in self._analyze(span.text):
-                if self.language == "dan":
-                    scored.extend(
-                        self._danish_tense_mood_candidates(
-                            analysis, span.text
-                        )
-                    )
-                else:
-                    scored.extend(
-                        self._agreement_candidates(analysis, span.text)
-                    )
+                scored.extend(self._agreement_candidates(analysis, span.text))
             replacement = self._choose_best(scored, span.text, rng)
             if replacement is not None:
+                self._record_morphology_edit(
+                    operation="agreement_corruption",
+                    token_index=index,
+                    span=span,
+                    replacement=replacement,
+                )
                 return _replace_spans(
                     text, [(span.start, span.end, replacement)]
                 )
         return text
 
     def random_inflection(self, item: dict) -> str:
+        self.last_edit_metadata = None
         text = self._text(item)
         spans = _word_spans(text)
         rng = self._rng(item, "random_inflection")
@@ -858,6 +893,12 @@ class MultilingualRulePerturber:
                 )
             replacement = self._choose_best(scored, span.text, rng)
             if replacement is not None:
+                self._record_morphology_edit(
+                    operation="random_inflection",
+                    token_index=index,
+                    span=span,
+                    replacement=replacement,
+                )
                 return _replace_spans(
                     text, [(span.start, span.end, replacement)]
                 )
@@ -956,12 +997,11 @@ def build_rule_templates(
     perturber: MultilingualRulePerturber,
 ) -> list[RuleTemplate]:
     return [
-        RuleTemplate("jumble", "Fluency", "ALL", perturber.jumble),
         RuleTemplate(
-            "subject_verb_dis",
+            "agreement_corruption",
             "Fluency",
             "ALL",
-            perturber.subject_verb_dis,
+            perturber.agreement_corruption,
         ),
         RuleTemplate(
             "random_inflection",
@@ -969,7 +1009,6 @@ def build_rule_templates(
             "ALL",
             perturber.random_inflection,
         ),
-        RuleTemplate("typos", "Fluency", "ALL", perturber.typos),
     ]
 
 
@@ -1156,8 +1195,8 @@ def rule_based_perturbation(
     )
     if not prototype_templates:
         raise ValueError(
-            "No templates selected. Available templates: jumble, "
-            "subject_verb_dis, random_inflection, typos."
+            "No templates selected. Available templates: agreement_corruption, "
+            "random_inflection."
         )
 
     if not ds_items:
@@ -1168,7 +1207,7 @@ def rule_based_perturbation(
         return []
 
     morphological_names = {
-        "subject_verb_dis", "random_inflection"
+        "agreement_corruption", "random_inflection"
     }
     needs_unimorph = any(
         template.name in morphological_names
